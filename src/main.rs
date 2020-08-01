@@ -1,7 +1,11 @@
 use structopt::StructOpt;
 
 mod lexer {
-    type Location = ((i32, i32), (i32, i32));
+
+    type Line = i32;
+    type Column = i32;
+
+    type Location = ((Line, Column), (Line, Column));
 
     #[derive(Debug)]
     struct LexFailure {
@@ -11,6 +15,8 @@ mod lexer {
 
     #[derive(Debug, PartialEq)]
     enum Token {
+        Identifier { loc: Location, value: String },
+        Equals { loc: Location },
         Number { loc: Location, value: String },
         SemiColon { loc: Location },
     }
@@ -48,6 +54,30 @@ mod lexer {
                         })
                     }
                 },
+                'A'..='Z' | 'a'..='z' => match pending {
+                    Some(Token::Identifier {
+                        loc: (start, _),
+                        value,
+                    }) => {
+                        pending = Some(Token::Identifier {
+                            value: format!("{}{}", value, c),
+                            loc: (start, (line, col)),
+                        })
+                    }
+                    Some(token) => {
+                        pending = Some(Token::Identifier {
+                            value: c.to_string(),
+                            loc: ((line, col), (line, col)),
+                        });
+                        tokens.push(token)
+                    }
+                    None => {
+                        pending = Some(Token::Identifier {
+                            value: c.to_string(),
+                            loc: ((line, col), (line, col)),
+                        })
+                    }
+                },
                 ';' => match pending {
                     Some(token) => {
                         tokens.push(token);
@@ -60,7 +90,26 @@ mod lexer {
                         loc: ((line, col), (line, col)),
                     }),
                 },
-                _ => panic!("unexpected token"),
+                '=' => match pending {
+                    Some(token) => {
+                        tokens.push(token);
+                        pending = None;
+                        tokens.push(Token::Equals {
+                            loc: ((line, col), (line, col)),
+                        })
+                    }
+                    None => tokens.push(Token::Equals {
+                        loc: ((line, col), (line, col)),
+                    }),
+                },
+                ' ' => match pending {
+                    Some(token) => {
+                        tokens.push(token);
+                        pending = None;
+                    }
+                    None => {}
+                },
+                x => panic!(format!("unexpected token {}", x)),
             }
             // adjust line and col
             match c {
@@ -114,6 +163,55 @@ mod lexer {
             Err(failure) => panic!(failure.message),
         }
     }
+
+    #[test]
+    fn it_lexs_characters() {
+        match lex("aBc;") {
+            Ok(tokens) => assert_eq!(
+                tokens,
+                [
+                    Token::Identifier {
+                        loc: ((1, 1), (1, 3)),
+                        value: String::from("aBc")
+                    },
+                    Token::SemiColon {
+                        loc: ((1, 4), (1, 4))
+                    }
+                ]
+            ),
+            Err(failure) => panic!(failure.message),
+        }
+    }
+
+    #[test]
+    fn it_lexs_statement() {
+        match lex("let x = 12;") {
+            Ok(tokens) => assert_eq!(
+                tokens,
+                [
+                    Token::Identifier {
+                        loc: ((1, 1), (1, 3)),
+                        value: String::from("let")
+                    },
+                    Token::Identifier {
+                        loc: ((1, 5), (1, 5)),
+                        value: String::from("x")
+                    },
+                    Token::Equals {
+                        loc: ((1, 7), (1, 7)),
+                    },
+                    Token::Number {
+                        loc: ((1, 9), (1, 10)),
+                        value: String::from("12")
+                    },
+                    Token::SemiColon {
+                        loc: ((1, 11), (1, 11))
+                    }
+                ]
+            ),
+            Err(failure) => panic!(failure.message),
+        }
+    }
 }
 
 #[derive(Debug, StructOpt)]
@@ -123,7 +221,7 @@ struct Cli {
 }
 
 fn main() {
-    let args = Cli::from_args();
-    println!("{:#?}", args);
+    // let args = Cli::from_args();
+    // println!("{:#?}", args);
     println!("Hello, world!");
 }
