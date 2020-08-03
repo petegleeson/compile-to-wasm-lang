@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use structopt::StructOpt;
 
 type Line = i32;
@@ -26,19 +25,19 @@ mod lexer {
     impl Token {
         pub fn location(&self) -> Location {
             match &self {
-                Token::Identifier { loc, value: _ } => *loc,
+                Token::Identifier { loc, .. } => *loc,
                 Token::Equals { loc } => *loc,
-                Token::Number { loc, value: _ } => *loc,
+                Token::Number { loc, .. } => *loc,
                 Token::SemiColon { loc } => *loc,
             }
         }
 
         pub fn value(&self) -> String {
             match &self {
-                Token::Identifier { loc: _, value } => value.clone(),
-                Token::Equals { loc: _ } => String::from("="),
-                Token::Number { loc: _, value } => value.clone(),
-                Token::SemiColon { loc: _ } => String::from(";"),
+                Token::Identifier { value, .. } => value.clone(),
+                Token::Equals { .. } => String::from("="),
+                Token::Number { value, .. } => value.clone(),
+                Token::SemiColon { .. } => String::from(";"),
             }
         }
     }
@@ -298,10 +297,14 @@ mod parser {
         pub fn bindings(&self) -> &HashMap<String, T> {
             match &self {
                 Scope::Global { bindings } => bindings,
-                Scope::Local {
-                    bindings,
-                    parent: _,
-                } => bindings,
+                Scope::Local { bindings, .. } => bindings,
+            }
+        }
+
+        pub fn add_binding(&mut self, id: String, v: T) -> Option<T> {
+            match self {
+                Scope::Global { bindings } => bindings.insert(id, v),
+                Scope::Local { bindings, .. } => bindings.insert(id, v),
             }
         }
     }
@@ -358,6 +361,7 @@ mod parser {
         message: String,
     }
 
+    #[derive(Debug, PartialEq)]
     struct ParseResult {
         scopes: HashMap<ScopeId, Scope<NodeId>>,
         numbers: HashMap<NodeId, Number>,
@@ -425,7 +429,10 @@ mod parser {
         }
 
         fn location(&self) -> Location {
-            self.location.clone()
+            match self.tokens.get(self.token) {
+                Some(t) => t.location(),
+                None => panic!("Internal error: cannot get location for token"),
+            }
         }
 
         fn get_scope(&self, id: ScopeId) -> &Scope<NodeId> {
@@ -452,6 +459,12 @@ mod parser {
                     }
                 }
             }
+        }
+
+        fn add_binding(&mut self, id: String, node_id: NodeId) -> Option<NodeId> {
+            self.scopes
+                .get_mut(&self.scope)
+                .and_then(|scope| scope.add_binding(id, node_id))
         }
     }
 
@@ -508,28 +521,145 @@ mod parser {
         })
     }
 
+    fn parse_expression(env: &mut Env) -> Result<Expression, ParseFailure> {
+        match env.peek_token() {
+            Some(Token::Identifier { .. }) => parse_identifier(env).map(Expression::Identifier),
+            Some(Token::Number { .. }) => parse_number(env).map(Expression::Number),
+            _ => Err(ParseFailure {
+                loc: env.location(),
+                message: String::from("Expected expression"),
+            }),
+        }
+    }
+
+    fn parse_declaration(env: &mut Env) -> Result<NodeId, ParseFailure> {
+        let uid = env.uid();
+        let (start, _) = env.location();
+        match env.next_token() {
+            Some(Token::Identifier { value, .. }) if value == "let" => Ok(()),
+            _ => Err(ParseFailure {
+                loc: env.location(),
+                message: String::from("Expected declaration to start with 'let' keyword"),
+            }),
+        }
+        .and_then(|_| match env.peek_token() {
+            Some(Token::Identifier { value, .. }) => {
+                let id_value = value.to_string();
+                match env.lookup_scope(&id_value) {
+                    None => {
+                        env.add_binding(id_value, uid);
+                        parse_identifier(env)
+                    }
+                    Some(_) => Err(ParseFailure {
+                        loc: env.location(),
+                        message: format!("Identifier '{}' is already declared", id_value),
+                    }),
+                }
+            }
+            _ => Err(ParseFailure {
+                loc: env.location(),
+                message: String::from("Expected identifier"),
+            }),
+        })
+        .and_then(|identifier_id| match env.next_token() {
+            Some(Token::Equals { .. }) => Ok(identifier_id),
+            _ => Err(ParseFailure {
+                loc: env.location(),
+                message: String::from("Expected '='"),
+            }),
+        })
+        .and_then(|identifier_id| parse_expression(env).map(|value| (identifier_id, value)))
+        .map(|(id, value)| {
+            let decl = Declaration {
+                id,
+                value,
+                uid,
+                loc: (start, env.location().0),
+                scope: env.scope,
+            };
+            env.declarations.insert(uid, decl);
+            uid
+        })
+    }
+
+    fn parse_statement(env: &mut Env) -> Result<Statement, ParseFailure> {
+        match env.peek_token() {
+            Some(Token::Identifier { value, .. }) if value == "let" => {
+                parse_declaration(env).map(Statement::Declaration)
+            }
+            _ => Err(ParseFailure {
+                loc: env.location(),
+                message: String::from("Expected statement"),
+            }),
+        }
+        .and_then(|stmt| match env.next_token() {
+            Some(Token::SemiColon { .. }) => Ok(stmt),
+            _ => Err(ParseFailure {
+                loc: env.location(),
+                message: String::from("Expected ';'"),
+            }),
+        })
+    }
+
     fn parse(tokens: Vec<Token>) -> Result<ParseResult, ParseFailure> {
         let mut env = Env::new(tokens);
-        let scope = env.scope;
+        let global_scope = env.scope;
         let uid = env.uid();
-        // parse everything
-        match parse_number(&mut env) {
-            Ok(node_id) => {
-                let (_, end) = env.location();
-                Ok(ParseResult {
-                    scopes: env.scopes,
-                    numbers: env.numbers,
-                    identifiers: env.identifiers,
-                    declarations: env.declarations,
-                    program: Program {
-                        uid,
-                        scope,
-                        loc: ((1, 1), end),
-                        statements: vec![Statement::Declaration(node_id)],
-                    },
-                })
+        let mut statements = Vec::new();
+        let mut end = (1, 1);
+        loop {
+            match env.peek_token() {
+                Some(_) => match parse_statement(&mut env) {
+                    Ok(statment) => {
+                        statements.push(statment);
+                    }
+                    Err(e) => break Err(e),
+                },
+                None => {
+                    break Ok(ParseResult {
+                        scopes: env.scopes,
+                        numbers: env.numbers,
+                        identifiers: env.identifiers,
+                        declarations: env.declarations,
+                        program: Program {
+                            uid,
+                            scope: global_scope,
+                            loc: ((1, 1), end),
+                            statements,
+                        },
+                    })
+                }
             }
-            Err(e) => Err(e),
+        }
+    }
+
+    #[test]
+    fn it_parses_tokens() {
+        match parse(vec![
+            Token::Identifier {
+                loc: ((1, 1), (1, 3)),
+                value: String::from("let"),
+            },
+            Token::Identifier {
+                loc: ((1, 5), (1, 5)),
+                value: String::from("x"),
+            },
+            Token::Equals {
+                loc: ((1, 7), (1, 7)),
+            },
+            Token::Number {
+                loc: ((1, 9), (1, 10)),
+                value: String::from("12"),
+            },
+            Token::SemiColon {
+                loc: ((1, 11), (1, 11)),
+            },
+        ]) {
+            Ok(parse_result) => {
+                println!("{:#?}", parse_result);
+                assert_eq!(1, 2);
+            }
+            Err(failure) => panic!(failure.message),
         }
     }
 }
