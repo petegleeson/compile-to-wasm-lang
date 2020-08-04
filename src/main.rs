@@ -264,7 +264,9 @@ mod lexer {
 mod parser {
     use crate::lexer::Token;
     use crate::Location;
+    use insta::assert_debug_snapshot;
     use std::collections::HashMap;
+
     /*
     <start> ::= <statement> ;
 
@@ -656,8 +658,7 @@ mod parser {
             },
         ]) {
             Ok(parse_result) => {
-                println!("{:#?}", parse_result);
-                assert_eq!(1, 2);
+                assert_debug_snapshot!(parse_result);
             }
             Err(failure) => panic!(failure.message),
         }

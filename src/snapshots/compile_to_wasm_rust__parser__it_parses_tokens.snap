@@ -1,0 +1,85 @@
+---
+source: src/main.rs
+expression: parse_result
+---
+ParseResult {
+    scopes: {
+        1: Global {
+            bindings: {
+                "x": 3,
+            },
+        },
+    },
+    numbers: {
+        5: Number {
+            uid: 5,
+            loc: (
+                (
+                    1,
+                    9,
+                ),
+                (
+                    1,
+                    10,
+                ),
+            ),
+            value: "12",
+        },
+    },
+    identifiers: {
+        4: Identifier {
+            uid: 4,
+            loc: (
+                (
+                    1,
+                    5,
+                ),
+                (
+                    1,
+                    5,
+                ),
+            ),
+            value: "x",
+            scope: 1,
+        },
+    },
+    declarations: {
+        3: Declaration {
+            uid: 3,
+            loc: (
+                (
+                    1,
+                    1,
+                ),
+                (
+                    1,
+                    11,
+                ),
+            ),
+            id: 4,
+            value: Number(
+                5,
+            ),
+            scope: 1,
+        },
+    },
+    program: Program {
+        uid: 2,
+        loc: (
+            (
+                1,
+                1,
+            ),
+            (
+                1,
+                1,
+            ),
+        ),
+        statements: [
+            Declaration(
+                3,
+            ),
+        ],
+        scope: 1,
+    },
+}
