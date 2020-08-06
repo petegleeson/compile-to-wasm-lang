@@ -374,7 +374,6 @@ mod parser {
 
     struct Env {
         next_id: i32,
-        location: Location,
         // current token index
         token: usize,
         // all tokens
@@ -401,7 +400,6 @@ mod parser {
                 next_id: 2,
                 token: 0,
                 tokens,
-                location: ((1, 1), (1, 1)),
                 scope: 1,
                 scopes,
                 numbers: HashMap::new(),
