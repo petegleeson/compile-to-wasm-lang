@@ -5,7 +5,12 @@ type Column = i32;
 
 type Location = ((Line, Column), (Line, Column));
 
+trait Locatable {
+    fn location(&self) -> Location;
+}
+
 mod lexer {
+    use crate::Locatable;
     use crate::Location;
 
     #[derive(Debug, PartialEq)]
@@ -22,8 +27,8 @@ mod lexer {
         SemiColon { loc: Location },
     }
 
-    impl Token {
-        pub fn location(&self) -> Location {
+    impl Locatable for Token {
+        fn location(&self) -> Location {
             match &self {
                 Token::Identifier { loc, .. } => *loc,
                 Token::Equals { loc } => *loc,
@@ -31,7 +36,9 @@ mod lexer {
                 Token::SemiColon { loc } => *loc,
             }
         }
+    }
 
+    impl Token {
         pub fn value(&self) -> String {
             match &self {
                 Token::Identifier { value, .. } => value.clone(),
@@ -263,6 +270,7 @@ mod lexer {
 
 mod parser {
     use crate::lexer::Token;
+    use crate::Locatable;
     use crate::Location;
     use insta::assert_debug_snapshot;
     use std::collections::HashMap;
@@ -282,10 +290,10 @@ mod parser {
 
     */
 
-    type ScopeId = i32;
+    pub type ScopeId = i32;
 
     #[derive(Debug, PartialEq)]
-    enum Scope<T> {
+    pub enum Scope<T> {
         Global {
             bindings: HashMap<String, T>,
         },
@@ -312,49 +320,90 @@ mod parser {
     }
 
     // @Idea NodeId<T> where T is reference type
-    type NodeId = i32;
+    pub type NodeId = i32;
 
     #[derive(Debug, PartialEq)]
-    struct Number {
+    pub struct Number {
         uid: NodeId,
         loc: Location,
         value: String,
     }
 
-    #[derive(Debug, PartialEq)]
-    struct Identifier {
-        uid: NodeId,
-        loc: Location,
-        value: String,
-        scope: ScopeId,
+    impl Locatable for Number {
+        fn location(&self) -> Location {
+            self.loc
+        }
     }
 
     #[derive(Debug, PartialEq)]
-    struct Program {
-        uid: NodeId,
-        loc: Location,
-        statements: Vec<Statement>,
-        scope: ScopeId,
+    pub struct Identifier {
+        pub uid: NodeId,
+        pub loc: Location,
+        pub value: String,
+        pub scope: ScopeId,
+    }
+
+    impl Locatable for Identifier {
+        fn location(&self) -> Location {
+            self.loc
+        }
     }
 
     #[derive(Debug, PartialEq)]
-    struct Declaration {
-        uid: NodeId,
-        loc: Location,
-        id: Identifier,
-        value: Expression,
-        scope: ScopeId,
+    pub struct Program {
+        pub uid: NodeId,
+        pub loc: Location,
+        pub statements: Vec<Statement>,
+        pub scope: ScopeId,
+    }
+
+    impl Locatable for Program {
+        fn location(&self) -> Location {
+            self.loc
+        }
     }
 
     #[derive(Debug, PartialEq)]
-    enum Statement {
+    pub struct Declaration {
+        pub uid: NodeId,
+        pub loc: Location,
+        pub id: Identifier,
+        pub value: Expression,
+        pub scope: ScopeId,
+    }
+
+    impl Locatable for Declaration {
+        fn location(&self) -> Location {
+            self.loc
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub enum Statement {
         Declaration(Declaration),
     }
 
+    impl Locatable for Statement {
+        fn location(&self) -> Location {
+            match self {
+                Statement::Declaration(d) => d.location(),
+            }
+        }
+    }
+
     #[derive(Debug, PartialEq)]
-    enum Expression {
+    pub enum Expression {
         Number(Number),
         Identifier(Identifier),
+    }
+
+    impl Locatable for Expression {
+        fn location(&self) -> Location {
+            match self {
+                Expression::Number(n) => n.location(),
+                Expression::Identifier(id) => id.location(),
+            }
+        }
     }
 
     #[derive(Debug, PartialEq)]
@@ -364,9 +413,9 @@ mod parser {
     }
 
     #[derive(Debug, PartialEq)]
-    struct ParseResult {
-        program: Program,
-        scopes: HashMap<ScopeId, Scope<NodeId>>,
+    pub struct ParseResult {
+        pub program: Program,
+        pub scopes: HashMap<ScopeId, Scope<NodeId>>,
     }
 
     // collection of mutable data used during parse tree creation
@@ -661,6 +710,253 @@ mod parser {
             Err(failure) => panic!(failure.message),
         }
     }
+}
+
+mod ast {
+
+    use crate::parser::NodeId;
+    use crate::parser::ScopeId;
+    use crate::typecheck::Type;
+    use crate::Location;
+
+    #[derive(Debug, PartialEq)]
+    pub struct Number {
+        uid: NodeId,
+        loc: Location,
+        value: String,
+        ty: Type,
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub struct Identifier {
+        uid: NodeId,
+        loc: Location,
+        value: String,
+        scope: ScopeId,
+        ty: Type,
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub struct Program {
+        pub uid: NodeId,
+        pub loc: Location,
+        pub statements: Vec<Statement>,
+        pub scope: ScopeId,
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub struct Declaration {
+        uid: NodeId,
+        loc: Location,
+        id: Identifier,
+        value: Expression,
+        scope: ScopeId,
+        ty: Type,
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub enum Statement {
+        Declaration(Declaration),
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub enum Expression {
+        Number(Number),
+        Identifier(Identifier),
+    }
+}
+
+mod typecheck {
+    use crate::ast;
+    use crate::parser;
+    use crate::parser::NodeId;
+    use crate::parser::Scope;
+    use crate::parser::ScopeId;
+    use crate::Locatable;
+    use crate::Location;
+    use std::collections::HashMap;
+    use std::ptr::eq;
+
+    #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+    pub enum Type {
+        Var(i32),
+        I32,
+    }
+
+    type Substitution = (Type, Type);
+    type Constraints = Vec<Substitution>;
+    type Solutions = Vec<Substitution>;
+
+    fn apply_substitution(subst: Substitution, constraint: Substitution) -> Substitution {
+        match (subst, constraint) {
+            ((Type::Var(x), replacement), (left, Type::Var(y))) if x == y => (left, replacement),
+            ((Type::Var(x), replacement), (Type::Var(y), right)) if x == y => (replacement, right),
+            (_, _) => constraint,
+        }
+    }
+
+    fn solve_constraint(constraints: Constraints, index: usize) -> Solutions {
+        match constraints.get(index) {
+            None => constraints,
+            Some(subst) => solve_constraint(
+                constraints
+                    .iter()
+                    .filter_map(|constraint| {
+                        // skip the constraint we are substituting
+                        if eq(subst, constraint) {
+                            Some(*constraint)
+                        } else {
+                            match apply_substitution(*subst, *constraint) {
+                                (left, right) if left == right => None,
+                                x => Some(x),
+                            }
+                        }
+                    })
+                    .collect(),
+                index + 1,
+            ),
+        }
+    }
+
+    // O(n^2)
+    fn solve_constraints(constraints: Constraints) -> Solutions {
+        solve_constraint(constraints, 0)
+    }
+
+    #[test]
+    fn it_solves_substitutions() {
+        assert_eq!(
+            solve_constraints(vec![
+                (Type::Var(2), Type::Var(1)),
+                (Type::Var(1), Type::I32)
+            ],),
+            vec![(Type::Var(2), Type::I32), (Type::Var(1), Type::I32)]
+        );
+    }
+
+    #[test]
+    fn it_solves_substitutions_in_any_order() {
+        assert_eq!(
+            solve_constraints(vec![
+                (Type::Var(1), Type::I32),
+                (Type::Var(2), Type::Var(1))
+            ],),
+            vec![(Type::Var(1), Type::I32), (Type::Var(2), Type::I32)]
+        );
+    }
+
+    #[test]
+    fn it_skips_duplicate_substitutions() {
+        assert_eq!(
+            solve_constraints(vec![(Type::Var(1), Type::I32), (Type::Var(1), Type::I32)],),
+            vec![(Type::Var(1), Type::I32)]
+        );
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub struct TypeCheckFailure {
+        loc: Location,
+        message: String,
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub struct TypeCheckResult {
+        pub program: ast::Program,
+        pub scopes: HashMap<ScopeId, Scope<NodeId>>,
+    }
+
+    /*
+
+    pub fn typecheck_identifier(
+        node: &parser::Identifier,
+        scopes: &HashMap<ScopeId, Scope<NodeId>>,
+    ) -> Result<ast::Identifier, TypeCheckFailure> {
+        let scope = scopes
+            .get(&node.scope)
+            .and_then(|scope| scope.bindings().get(&node.value));
+        Err(TypeCheckFailure {
+            loc: node.location(),
+            message: String::from("Program does not typecheck"),
+        })
+    }
+
+    pub fn typecheck_declaration(
+        node: &parser::Declaration,
+        scopes: &HashMap<ScopeId, Scope<NodeId>>,
+    ) -> Result<ast::Declaration, TypeCheckFailure> {
+        typecheck_identifier(&node.id, scopes)
+    }
+
+    pub fn typecheck_statement(
+        node: &parser::Statement,
+        scopes: &HashMap<ScopeId, Scope<NodeId>>,
+    ) -> Result<ast::Statement, TypeCheckFailure> {
+        match node {
+            parser::Statement::Declaration(d) => {
+                typecheck_declaration(d, scopes).map(|typed_d| ast::Statement::Declaration(typed_d))
+            }
+        }
+    }
+
+    pub fn typecheck_program(
+        node: &parser::Program,
+        scopes: &HashMap<ScopeId, Scope<NodeId>>,
+    ) -> Result<ast::Program, TypeCheckFailure> {
+        (&node.statements)
+            .into_iter()
+            .map(|s| typecheck_statement(&s, scopes))
+            .collect::<Result<Vec<ast::Statement>, TypeCheckFailure>>()
+            .map(|ss| ast::Program {
+                statements: ss,
+                uid: node.uid,
+                loc: node.location(),
+                scope: node.scope,
+            })
+    }
+
+    pub fn typecheck(res: parser::ParseResult) -> Result<TypeCheckResult, TypeCheckFailure> {
+        typecheck_program(&res.program, &res.scopes).map(|program| TypeCheckResult {
+            program,
+            scopes: res.scopes,
+        })
+    }
+
+    // fn gen_con_declaration(node: &Declaration) -> Constraint {
+    //     result
+    //         .program
+    //         .statements
+    //         .into_iter()
+    //         .map(|s| match s {})
+    //         .collect()
+    // }
+    */
+
+    /*
+    fn generate_constraints(result: &ParseResult) -> Vec<Constraint> {
+        result
+            .program
+            .statements
+            .into_iter()
+            .map(|s| match s {
+                Statement::Declaration(Declaration { id, value, .. }) => Constraint::Binding(),
+            })
+            .collect()
+    }
+
+    fn unify(a: Type, b: Type) -> Substitution {
+        HashMap::new()
+    }
+
+    #[test]
+    fn it_unifies_binding() {
+        use Constraint::*;
+        use Type::*;
+        assert_eq!(
+            unify(vec![Constant(I32)]),
+            vec![(Var(1), I32)].into_iter().collect()
+        )
+    }
+    */
 }
 
 #[derive(Debug, StructOpt)]
