@@ -304,7 +304,6 @@ mod parser {
     use crate::Locatable;
     use crate::Location;
     use crate::ParseFailure;
-    use insta::assert_debug_snapshot;
     use std::collections::HashMap;
 
     /*
@@ -778,7 +777,7 @@ mod parser {
             },
         ]) {
             Ok(parse_result) => {
-                assert_debug_snapshot!(parse_result);
+                insta::assert_debug_snapshot!(parse_result);
             }
             Err(failure) => panic!(failure.message()),
         }
@@ -849,7 +848,6 @@ mod typecheck {
     use crate::parser::ScopeId;
     use crate::Failure;
     use crate::Locatable;
-    use insta::assert_debug_snapshot;
     use std::collections::HashMap;
 
     #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
@@ -1150,7 +1148,7 @@ mod typecheck {
         ])
         .and_then(typecheck)
         {
-            Ok(ast) => assert_debug_snapshot!(ast),
+            Ok(ast) => insta::assert_debug_snapshot!(ast),
             Err(_) => panic!("typecheck failed"),
         }
     }
