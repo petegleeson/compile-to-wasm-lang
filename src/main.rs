@@ -9,15 +9,45 @@ trait Locatable {
     fn location(&self) -> Location;
 }
 
+#[derive(Debug, PartialEq)]
+pub struct LexFailure {
+    loc: Location,
+    message: String,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct TypeCheckFailure {
+    message: String,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ParseFailure {
+    loc: Location,
+    message: String,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Failure {
+    Lex(LexFailure),
+    Parse(ParseFailure),
+    TypeCheck(TypeCheckFailure),
+}
+
+impl Failure {
+    pub fn message(&self) -> String {
+        match self {
+            Failure::Lex(f) => f.message.clone(),
+            Failure::TypeCheck(f) => f.message.clone(),
+            Failure::Parse(f) => f.message.clone(),
+        }
+    }
+}
+
 mod lexer {
+    use crate::Failure;
+    use crate::LexFailure;
     use crate::Locatable;
     use crate::Location;
-
-    #[derive(Debug, PartialEq)]
-    struct LexFailure {
-        loc: Location,
-        message: String,
-    }
 
     #[derive(Debug, PartialEq)]
     pub enum Token {
@@ -49,7 +79,7 @@ mod lexer {
         }
     }
 
-    fn lex(content: &str) -> Result<Vec<Token>, LexFailure> {
+    fn lex(content: &str) -> Result<Vec<Token>, Failure> {
         let mut error: Option<LexFailure> = None;
         let mut tokens = Vec::new();
         let mut pending: Option<Token> = None;
@@ -161,7 +191,7 @@ mod lexer {
             }
         }
         match error {
-            Some(e) => Err(e),
+            Some(e) => Err(Failure::Lex(e)),
             None => Ok(tokens),
         }
     }
@@ -181,7 +211,7 @@ mod lexer {
                     }
                 ]
             ),
-            Err(failure) => panic!(failure.message),
+            Err(failure) => panic!(failure.message()),
         }
     }
 
@@ -200,7 +230,7 @@ mod lexer {
                     }
                 ]
             ),
-            Err(failure) => panic!(failure.message),
+            Err(failure) => panic!(failure.message()),
         }
     }
 
@@ -219,7 +249,7 @@ mod lexer {
                     }
                 ]
             ),
-            Err(failure) => panic!(failure.message),
+            Err(failure) => panic!(failure.message()),
         }
     }
 
@@ -249,7 +279,7 @@ mod lexer {
                     }
                 ]
             ),
-            Err(failure) => panic!(failure.message),
+            Err(failure) => panic!(failure.message()),
         }
     }
 
@@ -259,10 +289,10 @@ mod lexer {
             Ok(_) => panic!("Expected failure"),
             Err(failure) => assert_eq!(
                 failure,
-                LexFailure {
+                Failure::Lex(LexFailure {
                     loc: ((1, 2), (1, 2)),
                     message: String::from("Unexpected token '^'")
-                }
+                })
             ),
         }
     }
@@ -270,8 +300,10 @@ mod lexer {
 
 mod parser {
     use crate::lexer::Token;
+    use crate::Failure;
     use crate::Locatable;
     use crate::Location;
+    use crate::ParseFailure;
     use insta::assert_debug_snapshot;
     use std::collections::HashMap;
 
@@ -449,12 +481,6 @@ mod parser {
                 Expression::Identifier(id) => id.node_id(),
             }
         }
-    }
-
-    #[derive(Debug, PartialEq)]
-    pub struct ParseFailure {
-        loc: Location,
-        message: String,
     }
 
     pub type Scopes = HashMap<ScopeId, Scope<NodeId>>;
@@ -694,7 +720,7 @@ mod parser {
         })
     }
 
-    pub fn parse(tokens: Vec<Token>) -> Result<ParseResult, ParseFailure> {
+    pub fn parse(tokens: Vec<Token>) -> Result<ParseResult, Failure> {
         let mut token_iter = TokenIterator::new(tokens);
         let mut env = Env::new(
             1,
@@ -712,7 +738,7 @@ mod parser {
                         end = statement.location().1;
                         statements.push(statement);
                     }
-                    Err(e) => break Err(e),
+                    Err(e) => break Err(Failure::Parse(e)),
                 },
                 None => {
                     break Ok(ParseResult {
@@ -754,7 +780,7 @@ mod parser {
             Ok(parse_result) => {
                 assert_debug_snapshot!(parse_result);
             }
-            Err(failure) => panic!(failure.message),
+            Err(failure) => panic!(failure.message()),
         }
     }
 }
@@ -821,6 +847,7 @@ mod typecheck {
     use crate::parser::NodeId;
     use crate::parser::Scope;
     use crate::parser::ScopeId;
+    use crate::Failure;
     use crate::Locatable;
     use insta::assert_debug_snapshot;
     use std::collections::HashMap;
@@ -956,10 +983,7 @@ mod typecheck {
         }
     }
 
-    fn generate_constraints_number(
-        number: &parser::Number,
-        scopes: &parser::Scopes,
-    ) -> Constraints {
+    fn generate_constraints_number(number: &parser::Number) -> Constraints {
         vec![(Type::Var(number.node_id()), Type::I32)]
     }
 
@@ -968,7 +992,7 @@ mod typecheck {
         scopes: &parser::Scopes,
     ) -> Constraints {
         match expression {
-            parser::Expression::Number(expr) => generate_constraints_number(expr, scopes),
+            parser::Expression::Number(expr) => generate_constraints_number(expr),
             parser::Expression::Identifier(expr) => generate_constraints_identifier(expr, scopes),
         }
     }
@@ -1087,19 +1111,12 @@ mod typecheck {
     }
 
     #[derive(Debug, PartialEq)]
-    pub struct TypeCheckFailure {
-        /*
-    loc: Location,
-    message: String,
-    */}
-
-    #[derive(Debug, PartialEq)]
     pub struct TypeCheckResult {
         pub program: ast::Program,
         pub scopes: HashMap<ScopeId, Scope<NodeId>>,
     }
 
-    fn typecheck(result: parser::ParseResult) -> Result<TypeCheckResult, TypeCheckFailure> {
+    fn typecheck(result: parser::ParseResult) -> Result<TypeCheckResult, Failure> {
         let constraints = generate_constraints(&result);
         let solutions = solve_constraints(constraints);
         let program = apply_constraints(result.program, &solutions);
@@ -1111,7 +1128,7 @@ mod typecheck {
 
     #[test]
     fn it_typechecks_declaration() {
-        if let Ok(result) = parser::parse(vec![
+        match parser::parse(vec![
             Token::Identifier {
                 loc: ((1, 1), (1, 3)),
                 value: String::from("let"),
@@ -1130,14 +1147,11 @@ mod typecheck {
             Token::SemiColon {
                 loc: ((1, 11), (1, 11)),
             },
-        ]) {
-            if let Ok(ast) = typecheck(result) {
-                assert_debug_snapshot!(ast);
-            } else {
-                panic!("typecheck failed");
-            }
-        } else {
-            panic!("typecheck failed");
+        ])
+        .and_then(typecheck)
+        {
+            Ok(ast) => assert_debug_snapshot!(ast),
+            Err(_) => panic!("typecheck failed"),
         }
     }
 }
