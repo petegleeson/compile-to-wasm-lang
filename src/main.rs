@@ -322,11 +322,15 @@ mod parser {
     // @Idea NodeId<T> where T is reference type
     pub type NodeId = i32;
 
+    pub trait Node {
+        fn node_id(&self) -> NodeId;
+    }
+
     #[derive(Debug, PartialEq)]
     pub struct Number {
         uid: NodeId,
         loc: Location,
-        value: String,
+        pub value: String,
     }
 
     impl Locatable for Number {
@@ -335,10 +339,16 @@ mod parser {
         }
     }
 
+    impl Node for Number {
+        fn node_id(&self) -> NodeId {
+            self.uid
+        }
+    }
+
     #[derive(Debug, PartialEq)]
     pub struct Identifier {
-        pub uid: NodeId,
-        pub loc: Location,
+        uid: NodeId,
+        loc: Location,
         pub value: String,
         pub scope: ScopeId,
     }
@@ -349,10 +359,16 @@ mod parser {
         }
     }
 
+    impl Node for Identifier {
+        fn node_id(&self) -> NodeId {
+            self.uid
+        }
+    }
+
     #[derive(Debug, PartialEq)]
     pub struct Program {
-        pub uid: NodeId,
-        pub loc: Location,
+        uid: NodeId,
+        loc: Location,
         pub statements: Vec<Statement>,
         pub scope: ScopeId,
     }
@@ -363,10 +379,16 @@ mod parser {
         }
     }
 
+    impl Node for Program {
+        fn node_id(&self) -> NodeId {
+            self.uid
+        }
+    }
+
     #[derive(Debug, PartialEq)]
     pub struct Declaration {
-        pub uid: NodeId,
-        pub loc: Location,
+        uid: NodeId,
+        loc: Location,
         pub id: Identifier,
         pub value: Expression,
         pub scope: ScopeId,
@@ -375,6 +397,12 @@ mod parser {
     impl Locatable for Declaration {
         fn location(&self) -> Location {
             self.loc
+        }
+    }
+
+    impl Node for Declaration {
+        fn node_id(&self) -> NodeId {
+            self.uid
         }
     }
 
@@ -387,6 +415,14 @@ mod parser {
         fn location(&self) -> Location {
             match self {
                 Statement::Declaration(d) => d.location(),
+            }
+        }
+    }
+
+    impl Node for Statement {
+        fn node_id(&self) -> NodeId {
+            match self {
+                Statement::Declaration(d) => d.node_id(),
             }
         }
     }
@@ -406,16 +442,27 @@ mod parser {
         }
     }
 
+    impl Node for Expression {
+        fn node_id(&self) -> NodeId {
+            match self {
+                Expression::Number(n) => n.node_id(),
+                Expression::Identifier(id) => id.node_id(),
+            }
+        }
+    }
+
     #[derive(Debug, PartialEq)]
-    struct ParseFailure {
+    pub struct ParseFailure {
         loc: Location,
         message: String,
     }
 
+    pub type Scopes = HashMap<ScopeId, Scope<NodeId>>;
+
     #[derive(Debug, PartialEq)]
     pub struct ParseResult {
         pub program: Program,
-        pub scopes: HashMap<ScopeId, Scope<NodeId>>,
+        pub scopes: Scopes,
     }
 
     // collection of mutable data used during parse tree creation
@@ -647,7 +694,7 @@ mod parser {
         })
     }
 
-    fn parse(tokens: Vec<Token>) -> Result<ParseResult, ParseFailure> {
+    pub fn parse(tokens: Vec<Token>) -> Result<ParseResult, ParseFailure> {
         let mut token_iter = TokenIterator::new(tokens);
         let mut env = Env::new(
             1,
@@ -655,7 +702,6 @@ mod parser {
                 bindings: HashMap::new(),
             },
         );
-        // let global_scope = env.scope;
         let uid = env.uid();
         let mut statements = Vec::new();
         let mut end = (1, 1);
@@ -721,19 +767,19 @@ mod ast {
 
     #[derive(Debug, PartialEq)]
     pub struct Number {
-        uid: NodeId,
-        loc: Location,
-        value: String,
-        ty: Type,
+        pub uid: NodeId,
+        pub loc: Location,
+        pub value: String,
+        pub ty: Type,
     }
 
     #[derive(Debug, PartialEq)]
     pub struct Identifier {
-        uid: NodeId,
-        loc: Location,
-        value: String,
-        scope: ScopeId,
-        ty: Type,
+        pub uid: NodeId,
+        pub loc: Location,
+        pub value: String,
+        pub scope: ScopeId,
+        pub ty: Type,
     }
 
     #[derive(Debug, PartialEq)]
@@ -746,12 +792,12 @@ mod ast {
 
     #[derive(Debug, PartialEq)]
     pub struct Declaration {
-        uid: NodeId,
-        loc: Location,
-        id: Identifier,
-        value: Expression,
-        scope: ScopeId,
-        ty: Type,
+        pub uid: NodeId,
+        pub loc: Location,
+        pub id: Identifier,
+        pub value: Expression,
+        pub scope: ScopeId,
+        pub ty: Type,
     }
 
     #[derive(Debug, PartialEq)]
@@ -768,14 +814,15 @@ mod ast {
 
 mod typecheck {
     use crate::ast;
+    use crate::lexer::Token;
     use crate::parser;
+    use crate::parser::Node;
     use crate::parser::NodeId;
     use crate::parser::Scope;
     use crate::parser::ScopeId;
     use crate::Locatable;
-    use crate::Location;
+    use insta::assert_debug_snapshot;
     use std::collections::HashMap;
-    use std::ptr::eq;
 
     #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
     pub enum Type {
@@ -785,42 +832,49 @@ mod typecheck {
 
     type Substitution = (Type, Type);
     type Constraints = Vec<Substitution>;
-    type Solutions = Vec<Substitution>;
+    type Solutions = HashMap<i32, Type>;
 
-    fn apply_substitution(subst: Substitution, constraint: Substitution) -> Substitution {
-        match (subst, constraint) {
-            ((Type::Var(x), replacement), (left, Type::Var(y))) if x == y => (left, replacement),
-            ((Type::Var(x), replacement), (Type::Var(y), right)) if x == y => (replacement, right),
-            (_, _) => constraint,
+    fn apply_substitution(subst: Substitution, ty: Type) -> Type {
+        match (subst, ty) {
+            (_, Type::I32) => ty,
+            ((Type::Var(y), replacement), Type::Var(x)) if x == y => replacement,
+            _ => ty,
         }
     }
 
-    fn solve_constraint(constraints: Constraints, index: usize) -> Solutions {
-        match constraints.get(index) {
-            None => constraints,
+    fn solve_constraint(mut constraints: Constraints, solutions: Solutions) -> Solutions {
+        match constraints.pop() {
+            None => solutions,
             Some(subst) => solve_constraint(
                 constraints
                     .iter()
-                    .filter_map(|constraint| {
-                        // skip the constraint we are substituting
-                        if eq(subst, constraint) {
-                            Some(*constraint)
-                        } else {
-                            match apply_substitution(*subst, *constraint) {
-                                (left, right) if left == right => None,
-                                x => Some(x),
-                            }
+                    .filter_map(|(ty_left, ty_right)| {
+                        match (
+                            apply_substitution(subst, *ty_left),
+                            apply_substitution(subst, *ty_right),
+                        ) {
+                            (left, right) if left == right => None,
+                            x => Some(x),
                         }
                     })
                     .collect(),
-                index + 1,
+                {
+                    let mut next_solutions: Solutions = solutions
+                        .iter()
+                        .map(|(id, ty)| (*id, apply_substitution(subst, *ty)))
+                        .collect();
+                    if let (Type::Var(k), v) = subst {
+                        next_solutions.insert(k, v);
+                    }
+                    next_solutions
+                },
             ),
         }
     }
 
     // O(n^2)
     fn solve_constraints(constraints: Constraints) -> Solutions {
-        solve_constraint(constraints, 0)
+        solve_constraint(constraints, HashMap::new())
     }
 
     #[test]
@@ -830,7 +884,12 @@ mod typecheck {
                 (Type::Var(2), Type::Var(1)),
                 (Type::Var(1), Type::I32)
             ],),
-            vec![(Type::Var(2), Type::I32), (Type::Var(1), Type::I32)]
+            {
+                let mut res = HashMap::new();
+                res.insert(1, Type::I32);
+                res.insert(2, Type::I32);
+                res
+            }
         );
     }
 
@@ -841,7 +900,12 @@ mod typecheck {
                 (Type::Var(1), Type::I32),
                 (Type::Var(2), Type::Var(1))
             ],),
-            vec![(Type::Var(1), Type::I32), (Type::Var(2), Type::I32)]
+            {
+                let mut res = HashMap::new();
+                res.insert(1, Type::I32);
+                res.insert(2, Type::I32);
+                res
+            }
         );
     }
 
@@ -849,15 +913,165 @@ mod typecheck {
     fn it_skips_duplicate_substitutions() {
         assert_eq!(
             solve_constraints(vec![(Type::Var(1), Type::I32), (Type::Var(1), Type::I32)],),
-            vec![(Type::Var(1), Type::I32)]
+            {
+                let mut res = HashMap::new();
+                res.insert(1, Type::I32);
+                res
+            }
         );
+    }
+
+    fn generate_constraints_identifier(
+        identifier: &parser::Identifier,
+        scopes: &parser::Scopes,
+    ) -> Constraints {
+        match scopes
+            .get(&identifier.scope)
+            .map(|scope| scope.bindings().get(&identifier.value))
+            .flatten()
+        {
+            Some(parent_node_id) => {
+                vec![(Type::Var(identifier.node_id()), Type::Var(*parent_node_id))]
+            }
+            None => vec![],
+        }
+    }
+
+    fn generate_constraints_number(
+        number: &parser::Number,
+        scopes: &parser::Scopes,
+    ) -> Constraints {
+        vec![(Type::Var(number.node_id()), Type::I32)]
+    }
+
+    fn generate_constraints_expression(
+        expression: &parser::Expression,
+        scopes: &parser::Scopes,
+    ) -> Constraints {
+        match expression {
+            parser::Expression::Number(expr) => generate_constraints_number(expr, scopes),
+            parser::Expression::Identifier(expr) => generate_constraints_identifier(expr, scopes),
+        }
+    }
+
+    fn generate_constraints_declaration(
+        declaration: &parser::Declaration,
+        scopes: &parser::Scopes,
+    ) -> Constraints {
+        let mut constraints = Vec::new();
+        constraints.append(&mut generate_constraints_identifier(
+            &declaration.id,
+            scopes,
+        ));
+        constraints.append(&mut generate_constraints_expression(
+            &declaration.value,
+            scopes,
+        ));
+        constraints.push((
+            Type::Var(declaration.id.node_id()),
+            Type::Var(declaration.value.node_id()),
+        ));
+        constraints
+    }
+
+    fn generate_constraints_statement(
+        statement: &parser::Statement,
+        scopes: &parser::Scopes,
+    ) -> Constraints {
+        match statement {
+            parser::Statement::Declaration(d) => generate_constraints_declaration(d, scopes),
+        }
+    }
+
+    fn generate_constraints(result: &parser::ParseResult) -> Constraints {
+        result
+            .program
+            .statements
+            .iter()
+            .flat_map(|s| generate_constraints_statement(s, &result.scopes))
+            .collect()
+    }
+
+    fn apply_constraints_identifier(
+        identifier: parser::Identifier,
+        solved: &Solutions,
+    ) -> ast::Identifier {
+        ast::Identifier {
+            loc: identifier.location(),
+            scope: identifier.scope,
+            uid: identifier.node_id(),
+            ty: *solved.get(&identifier.node_id()).unwrap(),
+            value: identifier.value,
+        }
+    }
+
+    fn apply_constraints_number(number: parser::Number, solved: &Solutions) -> ast::Number {
+        ast::Number {
+            loc: number.location(),
+            uid: number.node_id(),
+            ty: *solved.get(&number.node_id()).unwrap(),
+            value: number.value,
+        }
+    }
+
+    fn apply_constraints_expression(
+        expression: parser::Expression,
+        solved: &Solutions,
+    ) -> ast::Expression {
+        match expression {
+            parser::Expression::Identifier(id) => {
+                ast::Expression::Identifier(apply_constraints_identifier(id, solved))
+            }
+            parser::Expression::Number(n) => {
+                ast::Expression::Number(apply_constraints_number(n, solved))
+            }
+        }
+    }
+
+    fn apply_constraints_declaration(
+        declaration: parser::Declaration,
+        solved: &Solutions,
+    ) -> ast::Declaration {
+        ast::Declaration {
+            loc: declaration.location(),
+            uid: declaration.node_id(),
+            scope: declaration.scope,
+            ty: Type::I32,
+            id: apply_constraints_identifier(declaration.id, solved),
+            value: apply_constraints_expression(declaration.value, solved),
+        }
+    }
+
+    fn apply_constraints_statement(
+        statement: parser::Statement,
+        solved: &Solutions,
+    ) -> ast::Statement {
+        match statement {
+            parser::Statement::Declaration(d) => {
+                ast::Statement::Declaration(apply_constraints_declaration(d, solved))
+            }
+        }
+    }
+
+    fn apply_constraints(program: parser::Program, solved: &Solutions) -> ast::Program {
+        ast::Program {
+            loc: program.location(),
+            uid: program.node_id(),
+            scope: program.scope,
+            statements: program
+                .statements
+                .into_iter()
+                .map(|s| apply_constraints_statement(s, solved))
+                .collect(),
+        }
     }
 
     #[derive(Debug, PartialEq)]
     pub struct TypeCheckFailure {
-        loc: Location,
-        message: String,
-    }
+        /*
+    loc: Location,
+    message: String,
+    */}
 
     #[derive(Debug, PartialEq)]
     pub struct TypeCheckResult {
@@ -865,98 +1079,44 @@ mod typecheck {
         pub scopes: HashMap<ScopeId, Scope<NodeId>>,
     }
 
-    /*
-
-    pub fn typecheck_identifier(
-        node: &parser::Identifier,
-        scopes: &HashMap<ScopeId, Scope<NodeId>>,
-    ) -> Result<ast::Identifier, TypeCheckFailure> {
-        let scope = scopes
-            .get(&node.scope)
-            .and_then(|scope| scope.bindings().get(&node.value));
-        Err(TypeCheckFailure {
-            loc: node.location(),
-            message: String::from("Program does not typecheck"),
-        })
-    }
-
-    pub fn typecheck_declaration(
-        node: &parser::Declaration,
-        scopes: &HashMap<ScopeId, Scope<NodeId>>,
-    ) -> Result<ast::Declaration, TypeCheckFailure> {
-        typecheck_identifier(&node.id, scopes)
-    }
-
-    pub fn typecheck_statement(
-        node: &parser::Statement,
-        scopes: &HashMap<ScopeId, Scope<NodeId>>,
-    ) -> Result<ast::Statement, TypeCheckFailure> {
-        match node {
-            parser::Statement::Declaration(d) => {
-                typecheck_declaration(d, scopes).map(|typed_d| ast::Statement::Declaration(typed_d))
-            }
-        }
-    }
-
-    pub fn typecheck_program(
-        node: &parser::Program,
-        scopes: &HashMap<ScopeId, Scope<NodeId>>,
-    ) -> Result<ast::Program, TypeCheckFailure> {
-        (&node.statements)
-            .into_iter()
-            .map(|s| typecheck_statement(&s, scopes))
-            .collect::<Result<Vec<ast::Statement>, TypeCheckFailure>>()
-            .map(|ss| ast::Program {
-                statements: ss,
-                uid: node.uid,
-                loc: node.location(),
-                scope: node.scope,
-            })
-    }
-
-    pub fn typecheck(res: parser::ParseResult) -> Result<TypeCheckResult, TypeCheckFailure> {
-        typecheck_program(&res.program, &res.scopes).map(|program| TypeCheckResult {
+    fn typecheck(result: parser::ParseResult) -> Result<TypeCheckResult, TypeCheckFailure> {
+        let constraints = generate_constraints(&result);
+        let solutions = solve_constraints(constraints);
+        let program = apply_constraints(result.program, &solutions);
+        Ok(TypeCheckResult {
             program,
-            scopes: res.scopes,
+            scopes: result.scopes,
         })
-    }
-
-    // fn gen_con_declaration(node: &Declaration) -> Constraint {
-    //     result
-    //         .program
-    //         .statements
-    //         .into_iter()
-    //         .map(|s| match s {})
-    //         .collect()
-    // }
-    */
-
-    /*
-    fn generate_constraints(result: &ParseResult) -> Vec<Constraint> {
-        result
-            .program
-            .statements
-            .into_iter()
-            .map(|s| match s {
-                Statement::Declaration(Declaration { id, value, .. }) => Constraint::Binding(),
-            })
-            .collect()
-    }
-
-    fn unify(a: Type, b: Type) -> Substitution {
-        HashMap::new()
     }
 
     #[test]
-    fn it_unifies_binding() {
-        use Constraint::*;
-        use Type::*;
-        assert_eq!(
-            unify(vec![Constant(I32)]),
-            vec![(Var(1), I32)].into_iter().collect()
-        )
+    fn it_typechecks_declaration() {
+        if let Ok(result) = parser::parse(vec![
+            Token::Identifier {
+                loc: ((1, 1), (1, 3)),
+                value: String::from("let"),
+            },
+            Token::Identifier {
+                loc: ((1, 5), (1, 5)),
+                value: String::from("x"),
+            },
+            Token::Equals {
+                loc: ((1, 7), (1, 7)),
+            },
+            Token::Number {
+                loc: ((1, 9), (1, 10)),
+                value: String::from("12"),
+            },
+            Token::SemiColon {
+                loc: ((1, 11), (1, 11)),
+            },
+        ]) {
+            if let Ok(ast) = typecheck(result) {
+                assert_debug_snapshot!(ast);
+            }
+        }
+        panic!("typecheck failed");
     }
-    */
 }
 
 #[derive(Debug, StructOpt)]
