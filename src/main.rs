@@ -708,8 +708,9 @@ mod parser {
         loop {
             match token_iter.peek_token() {
                 Some(_) => match parse_statement(&mut token_iter, &mut env) {
-                    Ok(statment) => {
-                        statements.push(statment);
+                    Ok(statement) => {
+                        end = statement.location().1;
+                        statements.push(statement);
                     }
                     Err(e) => break Err(e),
                 },
