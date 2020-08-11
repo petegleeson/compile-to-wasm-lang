@@ -827,6 +827,7 @@ mod typecheck {
     #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
     pub enum Type {
         Var(i32),
+        Void,
         I32,
     }
 
@@ -836,9 +837,10 @@ mod typecheck {
 
     fn apply_substitution(subst: Substitution, ty: Type) -> Type {
         match (subst, ty) {
-            (_, Type::I32) => ty,
             ((Type::Var(y), replacement), Type::Var(x)) if x == y => replacement,
-            _ => ty,
+            (_, Type::I32) => ty,
+            (_, Type::Void) => ty,
+            (_, Type::Var(_)) => ty,
         }
     }
 
@@ -888,6 +890,22 @@ mod typecheck {
                 let mut res = HashMap::new();
                 res.insert(1, Type::I32);
                 res.insert(2, Type::I32);
+                res
+            }
+        );
+    }
+
+    #[test]
+    fn it_solves_void_substitutions() {
+        assert_eq!(
+            solve_constraints(vec![
+                (Type::Var(2), Type::Var(1)),
+                (Type::Var(1), Type::Void)
+            ],),
+            {
+                let mut res = HashMap::new();
+                res.insert(1, Type::Void);
+                res.insert(2, Type::Void);
                 res
             }
         );
@@ -967,6 +985,7 @@ mod typecheck {
             &declaration.value,
             scopes,
         ));
+        constraints.push((Type::Var(declaration.node_id()), Type::Void));
         constraints.push((
             Type::Var(declaration.id.node_id()),
             Type::Var(declaration.value.node_id()),
@@ -1036,7 +1055,7 @@ mod typecheck {
             loc: declaration.location(),
             uid: declaration.node_id(),
             scope: declaration.scope,
-            ty: Type::I32,
+            ty: *solved.get(&declaration.node_id()).unwrap(),
             id: apply_constraints_identifier(declaration.id, solved),
             value: apply_constraints_expression(declaration.value, solved),
         }
@@ -1113,9 +1132,12 @@ mod typecheck {
         ]) {
             if let Ok(ast) = typecheck(result) {
                 assert_debug_snapshot!(ast);
+            } else {
+                panic!("typecheck failed");
             }
+        } else {
+            panic!("typecheck failed");
         }
-        panic!("typecheck failed");
     }
 }
 

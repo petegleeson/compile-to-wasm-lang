@@ -63,7 +63,7 @@ TypeCheckResult {
                         },
                     ),
                     scope: 1,
-                    ty: I32,
+                    ty: Void,
                 },
             ),
         ],
