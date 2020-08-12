@@ -1,3 +1,29 @@
+extern crate llvm_sys;
+
+use llvm_sys::bit_writer::*;
+use llvm_sys::core::*;
+
+macro_rules! c_str {
+    ($s:expr) => {
+        concat!($s, "\0").as_ptr() as *const i8
+    };
+}
+
+fn code_gen() {
+    unsafe {
+        let context = LLVMContextCreate();
+        let module = LLVMModuleCreateWithName(c_str!("main"));
+        let builder = LLVMCreateBuilderInContext(context);
+
+        LLVMSetTarget(module, c_str!("wasm32-unknown-unknown-wasm"));
+        LLVMWriteBitcodeToFile(module, c_str!("main.bc"));
+        LLVMDisposeBuilder(builder);
+
+        LLVMDisposeModule(module);
+        LLVMContextDispose(context);
+    }
+}
+
 use structopt::StructOpt;
 
 type Line = i32;
@@ -1163,5 +1189,6 @@ struct Cli {
 fn main() {
     // let args = Cli::from_args();
     // println!("{:#?}", args);
+    code_gen();
     println!("Hello, world!");
 }

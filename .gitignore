@@ -1,1 +1,6 @@
 /target
+/llvm/llvm-10.0.1
+/llvm/llvm-10.0.1.src
+*.o
+*.bc
+*.s

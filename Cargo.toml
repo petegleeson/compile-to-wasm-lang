@@ -11,3 +11,5 @@ insta = "0.16"
 
 [dependencies]
 structopt = "0.3"
+llvm-sys = "100"
+
