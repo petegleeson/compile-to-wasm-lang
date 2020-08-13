@@ -13,4 +13,5 @@ insta = "0.16"
 structopt = "0.3"
 llvm-sys = "100"
 libc = "0.2"
+tempfile = "3.1"
 

@@ -27,10 +27,30 @@ pub struct ParseFailure {
 }
 
 #[derive(Debug, PartialEq)]
+pub struct CodeGenFailure {
+    message: String,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct LinkFailure {
+    message: String,
+}
+
+impl From<std::io::Error> for LinkFailure {
+    fn from(e: std::io::Error) -> LinkFailure {
+        LinkFailure {
+            message: format!("Internal Link Error: {}", e),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
 pub enum Failure {
     Lex(LexFailure),
     Parse(ParseFailure),
     TypeCheck(TypeCheckFailure),
+    CodeGen(CodeGenFailure),
+    Link(LinkFailure),
 }
 
 impl Failure {
@@ -39,6 +59,8 @@ impl Failure {
             Failure::Lex(f) => f.message.clone(),
             Failure::TypeCheck(f) => f.message.clone(),
             Failure::Parse(f) => f.message.clone(),
+            Failure::CodeGen(f) => f.message.clone(),
+            Failure::Link(f) => f.message.clone(),
         }
     }
 }
@@ -1159,30 +1181,26 @@ mod codegen {
     extern crate libc;
     extern crate llvm_sys as llvm;
 
+    use crate::CodeGenFailure;
+
     use llvm::analysis::{LLVMVerifierFailureAction, LLVMVerifyModule};
-    use llvm::bit_writer::*;
     use llvm::core::*;
     use llvm::prelude::*;
     use llvm::target::{
         LLVMInitializeWebAssemblyAsmParser, LLVMInitializeWebAssemblyAsmPrinter,
         LLVMInitializeWebAssemblyDisassembler, LLVMInitializeWebAssemblyTarget,
-        LLVMInitializeWebAssemblyTargetInfo, LLVMInitializeWebAssemblyTargetMC, LLVMTargetDataRef,
-        LLVM_InitializeAllTargetInfos, LLVM_InitializeAllTargetMCs, LLVM_InitializeAllTargets,
-        LLVM_InitializeNativeAsmParser, LLVM_InitializeNativeAsmPrinter,
-        LLVM_InitializeNativeTarget,
+        LLVMInitializeWebAssemblyTargetInfo, LLVMInitializeWebAssemblyTargetMC,
     };
     use llvm::target_machine::LLVMCodeGenOptLevel::*;
     use llvm::target_machine::LLVMCodeModel::*;
-    use llvm::target_machine::LLVMGetDefaultTargetTriple;
     use llvm::target_machine::LLVMRelocMode::*;
     use llvm::target_machine::*;
     use llvm::target_machine::{LLVMTargetMachineEmitToFile, LLVMTargetMachineEmitToMemoryBuffer};
 
     use std::ffi::CString;
-    use std::mem;
     use std::mem::MaybeUninit;
-    use std::process::Command;
     use std::ptr;
+    use std::slice;
 
     macro_rules! c_str {
         ($s:expr) => {
@@ -1190,7 +1208,7 @@ mod codegen {
         };
     }
 
-    pub fn generate() {
+    pub fn generate<'a>() -> Result<&'a [u8], CodeGenFailure> {
         unsafe {
             LLVMInitializeWebAssemblyTargetInfo();
             LLVMInitializeWebAssemblyTarget();
@@ -1200,44 +1218,33 @@ mod codegen {
             LLVMInitializeWebAssemblyDisassembler();
 
             // setup
-            let context = LLVMContextCreate();
             let module = LLVMModuleCreateWithName(c_str!("main"));
+            let context = LLVMGetModuleContext(module);
             let builder = LLVMCreateBuilderInContext(context);
-
             // common types
-            let void_type = LLVMVoidTypeInContext(context);
-            let i8_type = LLVMIntTypeInContext(context, 8);
-            let i8_pointer_type = LLVMPointerType(i8_type, 0);
+            let i32_type = LLVMInt32TypeInContext(context);
+            // Get the type signature for void nop(void);
+            // Then create it in our module.
+            // let void = llvm::core::LLVMVoidTypeInContext(context);
+            let function_type = llvm::core::LLVMFunctionType(i32_type, ptr::null_mut(), 0, 0);
+            let function = llvm::core::LLVMAddFunction(
+                module,
+                b"getTwo\0".as_ptr() as *const _,
+                function_type,
+            );
 
-            LLVMAddGlobal(module, i8_type, c_str!("log"));
+            // Create a basic block in the function and set our builder to generate
+            // code in it.
+            let bb = llvm::core::LLVMAppendBasicBlockInContext(
+                context,
+                function,
+                b"entry\0".as_ptr() as *const _,
+            );
+            llvm::core::LLVMPositionBuilderAtEnd(builder, bb);
 
-            // declare that there's a `void log(i8*)` function in the environment
-            // but don't provide a block (aka body) so that it in the wasm module
-            // it'll be imported
-            // let log_func_type = LLVMFunctionType(void_type, i8_type as *mut _, 1, 0);
-            // let log_func = LLVMAddFunction(module, c_str!("log"), log_func_type);
-            // // let bb_ref = LLVMCreateBasicBlockInContext(context, c_str!("entry"));
-            // LLVMAppendBasicBlockInContext(context, log_func, c_str!("entry"));
+            LLVMBuildRet(builder, LLVMConstInt(i32_type, 42, 0));
 
-            // // our "main" function which we'll need to call explicitly from JavaScript
-            // // after we've instantiated the WebAssembly.Instance
-            // let main_func_type = LLVMFunctionType(void_type, ptr::null_mut(), 0, 0);
-            // let main_func = LLVMAddFunction(module, c_str!("main"), main_func_type);
-            // let main_block = LLVMAppendBasicBlockInContext(context, main_func, c_str!("main"));
-            // LLVMPositionBuilderAtEnd(builder, main_block);
-
-            // // main's function body
-            // let hello_world_str =
-            //     LLVMBuildGlobalStringPtr(builder, c_str!("hello, world."), c_str!(""));
-            // let log_args = [hello_world_str].as_ptr() as *mut _;
-            // // calling `log("hello, world.")`
-            // LLVMBuildCall(builder, log_func, log_args, 1, c_str!(""));
-            // LLVMBuildRetVoid(builder);
-
-            // write our bitcode file
-            LLVMSetTarget(module, c_str!("wasm32-unknown-unknown-elf"));
-            // LLVMWriteBitcodeToFile(module, c_str!("main.bc"));
-
+            // verify everything is good
             LLVMVerifyModule(
                 module,
                 LLVMVerifierFailureAction::LLVMPrintMessageAction,
@@ -1267,18 +1274,18 @@ mod codegen {
                 LLVMCodeModelDefault,
             );
 
+            LLVMSetTarget(module, c_str!("wasm32-unknown-unknown"));
             LLVMSetDataLayout(module, LLVMCreateTargetDataLayout(tm) as *const i8);
 
-            let out_file = CString::new("main.o").unwrap();
-
             let mut emit_error = MaybeUninit::<*mut libc::c_char>::uninit();
+            let mut emit_membuf = MaybeUninit::<LLVMMemoryBufferRef>::uninit();
 
-            let res = LLVMTargetMachineEmitToFile(
+            let res = LLVMTargetMachineEmitToMemoryBuffer(
                 tm,
                 module,
-                out_file.into_raw(),
                 LLVMCodeGenFileType::LLVMObjectFile,
                 emit_error.as_mut_ptr(),
+                emit_membuf.as_mut_ptr(),
             );
 
             if res != 0 {
@@ -1293,24 +1300,41 @@ mod codegen {
                 println!("code generated");
             }
 
-            let link_res = Command::new("./llvm-project/out/bin/lld")
-                .args(&[
-                    "-flavor",
-                    "wasm",
-                    "--allow-undefined",
-                    "--no-entry",
-                    "main.o",
-                    "-o",
-                    "main.wasm",
-                ])
-                .status()
-                .expect("Linking should work");
-
             LLVMDisposeTargetMachine(tm);
             LLVMDisposeBuilder(builder);
             LLVMDisposeModule(module);
             LLVMContextDispose(context);
+
+            let mbuf = emit_membuf.assume_init();
+            let p = LLVMGetBufferStart(mbuf);
+            let len = LLVMGetBufferSize(mbuf);
+            Ok(slice::from_raw_parts(p as *const _, len as usize))
         }
+    }
+}
+
+mod linker {
+    use crate::LinkFailure;
+    use std::io::Write;
+    use std::process::Command;
+    use tempfile::NamedTempFile;
+
+    pub fn link(file_name: &String, buffer: &[u8]) -> Result<(), LinkFailure> {
+        let mut obj_file = NamedTempFile::new()?;
+        obj_file.write_all(buffer)?;
+        // @TODO make this either call a C method or bundle lld in out dir binary
+        Command::new("./llvm-project/out/bin/lld")
+            .args(&[
+                "-flavor",
+                "wasm",
+                "--no-entry",
+                "--export-dynamic",
+                obj_file.path().to_str().unwrap(),
+                "-o",
+                &format!("{}.wasm", file_name),
+            ])
+            .status()?;
+        Ok(())
     }
 }
 
@@ -1323,6 +1347,8 @@ struct Cli {
 fn main() {
     // let args = Cli::from_args();
     // println!("{:#?}", args);
-    codegen::generate();
+    codegen::generate()
+        .map(|buf| linker::link(&String::from("main"), buf))
+        .expect("Something failed");
     println!("Hello, world!");
 }
