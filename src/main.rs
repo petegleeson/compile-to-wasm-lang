@@ -1,29 +1,3 @@
-extern crate llvm_sys;
-
-use llvm_sys::bit_writer::*;
-use llvm_sys::core::*;
-
-macro_rules! c_str {
-    ($s:expr) => {
-        concat!($s, "\0").as_ptr() as *const i8
-    };
-}
-
-fn code_gen() {
-    unsafe {
-        let context = LLVMContextCreate();
-        let module = LLVMModuleCreateWithName(c_str!("main"));
-        let builder = LLVMCreateBuilderInContext(context);
-
-        LLVMSetTarget(module, c_str!("wasm32-unknown-unknown-wasm"));
-        LLVMWriteBitcodeToFile(module, c_str!("main.bc"));
-        LLVMDisposeBuilder(builder);
-
-        LLVMDisposeModule(module);
-        LLVMContextDispose(context);
-    }
-}
-
 use structopt::StructOpt;
 
 type Line = i32;
@@ -1180,6 +1154,148 @@ mod typecheck {
     }
 }
 
+mod codegen {
+
+    extern crate libc;
+    extern crate llvm_sys as llvm;
+
+    use llvm::analysis::{LLVMVerifierFailureAction, LLVMVerifyModule};
+    use llvm::bit_writer::*;
+    use llvm::core::*;
+    use llvm::prelude::*;
+    use llvm::target::{
+        LLVMInitializeWebAssemblyAsmParser, LLVMInitializeWebAssemblyAsmPrinter,
+        LLVMInitializeWebAssemblyDisassembler, LLVMInitializeWebAssemblyTarget,
+        LLVMInitializeWebAssemblyTargetInfo, LLVMInitializeWebAssemblyTargetMC, LLVMTargetDataRef,
+        LLVM_InitializeAllTargetInfos, LLVM_InitializeAllTargetMCs, LLVM_InitializeAllTargets,
+        LLVM_InitializeNativeAsmParser, LLVM_InitializeNativeAsmPrinter,
+        LLVM_InitializeNativeTarget,
+    };
+    use llvm::target_machine::LLVMCodeGenOptLevel::*;
+    use llvm::target_machine::LLVMCodeModel::*;
+    use llvm::target_machine::LLVMGetDefaultTargetTriple;
+    use llvm::target_machine::LLVMRelocMode::*;
+    use llvm::target_machine::*;
+    use llvm::target_machine::{LLVMTargetMachineEmitToFile, LLVMTargetMachineEmitToMemoryBuffer};
+
+    use std::ffi::CString;
+    use std::mem;
+    use std::mem::MaybeUninit;
+    use std::ptr;
+
+    macro_rules! c_str {
+        ($s:expr) => {
+            concat!($s, "\0").as_ptr() as *const i8
+        };
+    }
+
+    pub fn generate() {
+        unsafe {
+            LLVMInitializeWebAssemblyTargetInfo();
+            LLVMInitializeWebAssemblyTarget();
+            LLVMInitializeWebAssemblyTargetMC();
+            LLVMInitializeWebAssemblyAsmPrinter();
+            LLVMInitializeWebAssemblyAsmParser();
+            LLVMInitializeWebAssemblyDisassembler();
+
+            let context = LLVMContextCreate();
+            let module = LLVMModuleCreateWithName(c_str!("main"));
+            let builder = LLVMCreateBuilderInContext(context);
+
+            // common types
+            let void_type = LLVMVoidTypeInContext(context);
+            let i8_type = LLVMIntTypeInContext(context, 8);
+            let i8_pointer_type = LLVMPointerType(i8_type, 0);
+
+            // declare that there's a `void log(i8*)` function in the environment
+            // but don't provide a block (aka body) so that it in the wasm module
+            // it'll be imported
+            let log_func_type =
+                LLVMFunctionType(void_type, [i8_pointer_type].as_ptr() as *mut _, 1, 0);
+            let log_func = LLVMAddFunction(module, c_str!("log"), log_func_type);
+
+            // our "main" function which we'll need to call explicitly from JavaScript
+            // after we've instantiated the WebAssembly.Instance
+            let main_func_type = LLVMFunctionType(void_type, ptr::null_mut(), 0, 0);
+            let main_func = LLVMAddFunction(module, c_str!("main"), main_func_type);
+            let main_block = LLVMAppendBasicBlockInContext(context, main_func, c_str!("main"));
+            LLVMPositionBuilderAtEnd(builder, main_block);
+
+            // main's function body
+            let hello_world_str =
+                LLVMBuildGlobalStringPtr(builder, c_str!("hello, world."), c_str!(""));
+            let log_args = [hello_world_str].as_ptr() as *mut _;
+            // calling `log("hello, world.")`
+            LLVMBuildCall(builder, log_func, log_args, 1, c_str!(""));
+            LLVMBuildRetVoid(builder);
+
+            let triple_1 = c_str!("wasm32-unknown-unknown");
+
+            LLVMSetTarget(module, triple_1);
+
+            LLVMVerifyModule(
+                module,
+                LLVMVerifierFailureAction::LLVMPrintMessageAction,
+                ptr::null_mut(),
+            );
+
+            // generate code
+            let triple = CString::new("wasm32-unknown-unknown").unwrap();
+            let mut target = MaybeUninit::<LLVMTargetRef>::uninit();
+            let mut error = MaybeUninit::<*mut libc::c_char>::uninit();
+
+            let r =
+                LLVMGetTargetFromTriple(triple.as_ptr(), target.as_mut_ptr(), error.as_mut_ptr());
+            // println!(
+            //     "result {}, error {}",
+            //     r,
+            //     CString::from_raw(error.assume_init()).to_str().unwrap()
+            // );
+            // println!("target: {:?}", *LLVMGetFirstTarget());
+            let tm = LLVMCreateTargetMachine(
+                target.assume_init(),
+                triple.as_ptr(),
+                b"\0".as_ptr() as *const _,
+                b"\0".as_ptr() as *const _,
+                LLVMCodeGenLevelDefault,
+                LLVMRelocDefault,
+                LLVMCodeModelDefault,
+            );
+
+            LLVMSetDataLayout(module, LLVMCreateTargetDataLayout(tm) as *const i8);
+
+            let out_file = CString::new("main.o").unwrap();
+
+            let mut emit_error = MaybeUninit::<*mut libc::c_char>::uninit();
+
+            let res = LLVMTargetMachineEmitToFile(
+                tm,
+                module,
+                out_file.into_raw(),
+                LLVMCodeGenFileType::LLVMObjectFile,
+                emit_error.as_mut_ptr(),
+            );
+
+            if res != 0 {
+                println!(
+                    "result {}, error {}",
+                    res,
+                    CString::from_raw(emit_error.assume_init())
+                        .to_str()
+                        .unwrap()
+                );
+            } else {
+                println!("code generated");
+            }
+
+            LLVMDisposeTargetMachine(tm);
+            LLVMDisposeBuilder(builder);
+            LLVMDisposeModule(module);
+            LLVMContextDispose(context);
+        }
+    }
+}
+
 #[derive(Debug, StructOpt)]
 struct Cli {
     #[structopt(parse(from_os_str))]
@@ -1189,6 +1305,6 @@ struct Cli {
 fn main() {
     // let args = Cli::from_args();
     // println!("{:#?}", args);
-    code_gen();
+    codegen::generate();
     println!("Hello, world!");
 }
