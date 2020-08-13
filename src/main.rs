@@ -1181,6 +1181,7 @@ mod codegen {
     use std::ffi::CString;
     use std::mem;
     use std::mem::MaybeUninit;
+    use std::process::Command;
     use std::ptr;
 
     macro_rules! c_str {
@@ -1198,6 +1199,7 @@ mod codegen {
             LLVMInitializeWebAssemblyAsmParser();
             LLVMInitializeWebAssemblyDisassembler();
 
+            // setup
             let context = LLVMContextCreate();
             let module = LLVMModuleCreateWithName(c_str!("main"));
             let builder = LLVMCreateBuilderInContext(context);
@@ -1207,31 +1209,34 @@ mod codegen {
             let i8_type = LLVMIntTypeInContext(context, 8);
             let i8_pointer_type = LLVMPointerType(i8_type, 0);
 
+            LLVMAddGlobal(module, i8_type, c_str!("log"));
+
             // declare that there's a `void log(i8*)` function in the environment
             // but don't provide a block (aka body) so that it in the wasm module
             // it'll be imported
-            let log_func_type =
-                LLVMFunctionType(void_type, [i8_pointer_type].as_ptr() as *mut _, 1, 0);
-            let log_func = LLVMAddFunction(module, c_str!("log"), log_func_type);
+            // let log_func_type = LLVMFunctionType(void_type, i8_type as *mut _, 1, 0);
+            // let log_func = LLVMAddFunction(module, c_str!("log"), log_func_type);
+            // // let bb_ref = LLVMCreateBasicBlockInContext(context, c_str!("entry"));
+            // LLVMAppendBasicBlockInContext(context, log_func, c_str!("entry"));
 
-            // our "main" function which we'll need to call explicitly from JavaScript
-            // after we've instantiated the WebAssembly.Instance
-            let main_func_type = LLVMFunctionType(void_type, ptr::null_mut(), 0, 0);
-            let main_func = LLVMAddFunction(module, c_str!("main"), main_func_type);
-            let main_block = LLVMAppendBasicBlockInContext(context, main_func, c_str!("main"));
-            LLVMPositionBuilderAtEnd(builder, main_block);
+            // // our "main" function which we'll need to call explicitly from JavaScript
+            // // after we've instantiated the WebAssembly.Instance
+            // let main_func_type = LLVMFunctionType(void_type, ptr::null_mut(), 0, 0);
+            // let main_func = LLVMAddFunction(module, c_str!("main"), main_func_type);
+            // let main_block = LLVMAppendBasicBlockInContext(context, main_func, c_str!("main"));
+            // LLVMPositionBuilderAtEnd(builder, main_block);
 
-            // main's function body
-            let hello_world_str =
-                LLVMBuildGlobalStringPtr(builder, c_str!("hello, world."), c_str!(""));
-            let log_args = [hello_world_str].as_ptr() as *mut _;
-            // calling `log("hello, world.")`
-            LLVMBuildCall(builder, log_func, log_args, 1, c_str!(""));
-            LLVMBuildRetVoid(builder);
+            // // main's function body
+            // let hello_world_str =
+            //     LLVMBuildGlobalStringPtr(builder, c_str!("hello, world."), c_str!(""));
+            // let log_args = [hello_world_str].as_ptr() as *mut _;
+            // // calling `log("hello, world.")`
+            // LLVMBuildCall(builder, log_func, log_args, 1, c_str!(""));
+            // LLVMBuildRetVoid(builder);
 
-            let triple_1 = c_str!("wasm32-unknown-unknown");
-
-            LLVMSetTarget(module, triple_1);
+            // write our bitcode file
+            LLVMSetTarget(module, c_str!("wasm32-unknown-unknown-elf"));
+            // LLVMWriteBitcodeToFile(module, c_str!("main.bc"));
 
             LLVMVerifyModule(
                 module,
@@ -1287,6 +1292,19 @@ mod codegen {
             } else {
                 println!("code generated");
             }
+
+            let link_res = Command::new("./llvm-project/out/bin/lld")
+                .args(&[
+                    "-flavor",
+                    "wasm",
+                    "--allow-undefined",
+                    "--no-entry",
+                    "main.o",
+                    "-o",
+                    "main.wasm",
+                ])
+                .status()
+                .expect("Linking should work");
 
             LLVMDisposeTargetMachine(tm);
             LLVMDisposeBuilder(builder);

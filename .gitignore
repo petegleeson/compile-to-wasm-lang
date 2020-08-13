@@ -1,6 +1,10 @@
 /target
-/llvm/llvm-10.0.1
-/llvm/llvm-10.0.1.src
+/llvm-project/build
+/llvm-project/lld
+/llvm-project/llvm
+/llvm-project/out
 *.o
 *.bc
 *.s
+*.wasm
+*.wat
