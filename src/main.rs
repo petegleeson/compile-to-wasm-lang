@@ -1181,7 +1181,7 @@ mod codegen {
     extern crate libc;
     extern crate llvm_sys as llvm;
 
-    use crate::CodeGenFailure;
+    use crate::{CodeGenFailure, Failure};
 
     use llvm::analysis::{LLVMVerifierFailureAction, LLVMVerifyModule};
     use llvm::core::*;
@@ -1208,18 +1208,11 @@ mod codegen {
         };
     }
 
-    pub fn generate<'a>() -> Result<&'a [u8], CodeGenFailure> {
+    fn generate_program<'a>(
+        module: LLVMModuleRef,
+        context: LLVMContextRef,
+    ) -> Result<(), CodeGenFailure> {
         unsafe {
-            LLVMInitializeWebAssemblyTargetInfo();
-            LLVMInitializeWebAssemblyTarget();
-            LLVMInitializeWebAssemblyTargetMC();
-            LLVMInitializeWebAssemblyAsmPrinter();
-            LLVMInitializeWebAssemblyAsmParser();
-            LLVMInitializeWebAssemblyDisassembler();
-
-            // setup
-            let module = LLVMModuleCreateWithName(c_str!("main"));
-            let context = LLVMGetModuleContext(module);
             let builder = LLVMCreateBuilderInContext(context);
             // common types
             let i32_type = LLVMInt32TypeInContext(context);
@@ -1244,82 +1237,129 @@ mod codegen {
 
             LLVMBuildRet(builder, LLVMConstInt(i32_type, 42, 0));
 
-            // verify everything is good
-            LLVMVerifyModule(
-                module,
-                LLVMVerifierFailureAction::LLVMPrintMessageAction,
-                ptr::null_mut(),
-            );
-
-            // generate code
-            let triple = CString::new("wasm32-unknown-unknown").unwrap();
-            let mut target = MaybeUninit::<LLVMTargetRef>::uninit();
-            let mut error = MaybeUninit::<*mut libc::c_char>::uninit();
-
-            let r =
-                LLVMGetTargetFromTriple(triple.as_ptr(), target.as_mut_ptr(), error.as_mut_ptr());
-            // println!(
-            //     "result {}, error {}",
-            //     r,
-            //     CString::from_raw(error.assume_init()).to_str().unwrap()
-            // );
-            // println!("target: {:?}", *LLVMGetFirstTarget());
-            let tm = LLVMCreateTargetMachine(
-                target.assume_init(),
-                triple.as_ptr(),
-                b"\0".as_ptr() as *const _,
-                b"\0".as_ptr() as *const _,
-                LLVMCodeGenLevelDefault,
-                LLVMRelocDefault,
-                LLVMCodeModelDefault,
-            );
-
-            LLVMSetTarget(module, c_str!("wasm32-unknown-unknown"));
-            LLVMSetDataLayout(module, LLVMCreateTargetDataLayout(tm) as *const i8);
-
-            let mut emit_error = MaybeUninit::<*mut libc::c_char>::uninit();
-            let mut emit_membuf = MaybeUninit::<LLVMMemoryBufferRef>::uninit();
-
-            let res = LLVMTargetMachineEmitToMemoryBuffer(
-                tm,
-                module,
-                LLVMCodeGenFileType::LLVMObjectFile,
-                emit_error.as_mut_ptr(),
-                emit_membuf.as_mut_ptr(),
-            );
-
-            if res != 0 {
-                println!(
-                    "result {}, error {}",
-                    res,
-                    CString::from_raw(emit_error.assume_init())
-                        .to_str()
-                        .unwrap()
-                );
-            } else {
-                println!("code generated");
-            }
-
-            LLVMDisposeTargetMachine(tm);
             LLVMDisposeBuilder(builder);
+            {
+                // verify module is valid
+                let mut out_error = MaybeUninit::<*mut libc::c_char>::uninit();
+                match LLVMVerifyModule(
+                    module,
+                    LLVMVerifierFailureAction::LLVMReturnStatusAction,
+                    out_error.as_mut_ptr(),
+                ) {
+                    0 => Ok(()),
+                    _ => Err(CodeGenFailure {
+                        message: CString::from_raw(out_error.assume_init())
+                            .to_str()
+                            .unwrap()
+                            .to_owned(),
+                    }),
+                }
+            }
+        }
+    }
+
+    fn try_generate<'a>() -> Result<&'a [u8], CodeGenFailure> {
+        unsafe {
+            // setup
+            let module = LLVMModuleCreateWithName(c_str!("main"));
+            let context = LLVMGetModuleContext(module);
+            let result = match generate_program(module, context) {
+                Err(e) => Err(e),
+                Ok(_) => {
+                    LLVMInitializeWebAssemblyTargetInfo();
+                    LLVMInitializeWebAssemblyTarget();
+                    LLVMInitializeWebAssemblyTargetMC();
+                    LLVMInitializeWebAssemblyAsmPrinter();
+                    LLVMInitializeWebAssemblyAsmParser();
+                    LLVMInitializeWebAssemblyDisassembler();
+
+                    let triple = CString::new("wasm32-unknown-unknown").unwrap();
+
+                    {
+                        let mut out_target = MaybeUninit::<LLVMTargetRef>::uninit();
+                        let mut out_error = MaybeUninit::<*mut libc::c_char>::uninit();
+                        match LLVMGetTargetFromTriple(
+                            triple.as_ptr(),
+                            out_target.as_mut_ptr(),
+                            out_error.as_mut_ptr(),
+                        ) {
+                            0 => Ok(out_target.assume_init()),
+                            _ => Err(CodeGenFailure {
+                                message: CString::from_raw(out_error.assume_init())
+                                    .to_str()
+                                    .unwrap()
+                                    .to_owned(),
+                            }),
+                        }
+                    }
+                    .and_then(|target| {
+                        let tm = LLVMCreateTargetMachine(
+                            target,
+                            triple.as_ptr(),
+                            b"\0".as_ptr() as *const _,
+                            b"\0".as_ptr() as *const _,
+                            LLVMCodeGenLevelDefault,
+                            LLVMRelocDefault,
+                            LLVMCodeModelDefault,
+                        );
+
+                        LLVMSetTarget(module, triple.as_ptr());
+                        LLVMSetDataLayout(module, LLVMCreateTargetDataLayout(tm) as *const i8);
+
+                        let mut out_membuf = MaybeUninit::<LLVMMemoryBufferRef>::uninit();
+                        let mut out_error = MaybeUninit::<*mut libc::c_char>::uninit();
+                        let result = match LLVMTargetMachineEmitToMemoryBuffer(
+                            tm,
+                            module,
+                            LLVMCodeGenFileType::LLVMObjectFile,
+                            out_error.as_mut_ptr(),
+                            out_membuf.as_mut_ptr(),
+                        ) {
+                            0 => Ok(out_membuf.assume_init()),
+                            _ => Err(CodeGenFailure {
+                                message: CString::from_raw(out_error.assume_init())
+                                    .to_str()
+                                    .unwrap()
+                                    .to_owned(),
+                            }),
+                        };
+
+                        LLVMDisposeTargetMachine(tm);
+                        result
+                    })
+                    .and_then(|mbuf| {
+                        let p = LLVMGetBufferStart(mbuf);
+                        let len = LLVMGetBufferSize(mbuf);
+                        // @Fix memory leak - mbuf doesn't get free deallocd
+                        // Doing this LLVMDisposeMemoryBuffer(mbuf) disposes slice memory
+                        // likely need to copy memory into rust owned buffer
+                        let result = slice::from_raw_parts(p as *const _, len as usize);
+                        Ok(result)
+                    })
+                }
+            };
+
             LLVMDisposeModule(module);
             LLVMContextDispose(context);
+            result
+        }
+    }
 
-            let mbuf = emit_membuf.assume_init();
-            let p = LLVMGetBufferStart(mbuf);
-            let len = LLVMGetBufferSize(mbuf);
-            Ok(slice::from_raw_parts(p as *const _, len as usize))
+    pub fn generate<'a>() -> Result<&'a [u8], Failure> {
+        match try_generate() {
+            Err(e) => Err(Failure::CodeGen(e)),
+            Ok(buf) => Ok(buf),
         }
     }
 }
 
 mod linker {
-    use crate::LinkFailure;
+    use crate::{Failure, LinkFailure};
     use std::io::Write;
     use std::process::Command;
     use tempfile::NamedTempFile;
 
-    pub fn link(file_name: &String, buffer: &[u8]) -> Result<(), LinkFailure> {
+    fn try_link(file_name: &String, buffer: &[u8]) -> Result<(), LinkFailure> {
         let mut obj_file = NamedTempFile::new()?;
         obj_file.write_all(buffer)?;
         // @TODO make this either call a C method or bundle lld in out dir binary
@@ -1336,6 +1376,13 @@ mod linker {
             .status()?;
         Ok(())
     }
+
+    pub fn link(file_name: &String, buffer: &[u8]) -> Result<(), Failure> {
+        match try_link(file_name, buffer) {
+            Err(e) => Err(Failure::Link(e)),
+            Ok(_) => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug, StructOpt)]
@@ -1348,7 +1395,7 @@ fn main() {
     // let args = Cli::from_args();
     // println!("{:#?}", args);
     codegen::generate()
-        .map(|buf| linker::link(&String::from("main"), buf))
+        .and_then(|buf| linker::link(&String::from("main"), buf))
         .expect("Something failed");
     println!("Hello, world!");
 }
