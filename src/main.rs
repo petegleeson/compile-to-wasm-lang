@@ -101,7 +101,7 @@ mod lexer {
         }
     }
 
-    fn lex(content: &str) -> Result<Vec<Token>, Failure> {
+    pub fn lex(content: &str) -> Result<Vec<Token>, Failure> {
         let mut error: Option<LexFailure> = None;
         let mut tokens = Vec::new();
         let mut pending: Option<Token> = None;
@@ -1136,7 +1136,7 @@ mod typecheck {
         pub scopes: HashMap<ScopeId, Scope<NodeId>>,
     }
 
-    fn typecheck(result: parser::ParseResult) -> Result<TypeCheckResult, Failure> {
+    pub fn typecheck(result: parser::ParseResult) -> Result<TypeCheckResult, Failure> {
         let constraints = generate_constraints(&result);
         let solutions = solve_constraints(constraints);
         let program = apply_constraints(result.program, &solutions);
@@ -1181,6 +1181,10 @@ mod codegen {
     extern crate libc;
     extern crate llvm_sys as llvm;
 
+    use crate::ast::{Declaration, Expression, Identifier, Number, Program, Statement};
+    use crate::parser::NodeId;
+    use crate::parser::Scope;
+    use crate::parser::ScopeId;
     use crate::{CodeGenFailure, Failure};
 
     use llvm::analysis::{LLVMVerifierFailureAction, LLVMVerifyModule};
@@ -1194,9 +1198,9 @@ mod codegen {
     use llvm::target_machine::LLVMCodeGenOptLevel::*;
     use llvm::target_machine::LLVMCodeModel::*;
     use llvm::target_machine::LLVMRelocMode::*;
+    use llvm::target_machine::LLVMTargetMachineEmitToMemoryBuffer;
     use llvm::target_machine::*;
-    use llvm::target_machine::{LLVMTargetMachineEmitToFile, LLVMTargetMachineEmitToMemoryBuffer};
-
+    use std::collections::HashMap;
     use std::ffi::CString;
     use std::mem::MaybeUninit;
     use std::ptr;
@@ -1208,41 +1212,43 @@ mod codegen {
         };
     }
 
-    fn generate_program<'a>(
+    struct Types {
+        int_32: LLVMTypeRef,
+    }
+
+    struct Env {
         module: LLVMModuleRef,
         context: LLVMContextRef,
+        builder: LLVMBuilderRef,
+        types: Types,
+    }
+    fn generate_statement<'a>(
+        env: &mut Env,
+        statement: &Statement,
+        scopes: &HashMap<ScopeId, Scope<NodeId>>,
     ) -> Result<(), CodeGenFailure> {
-        unsafe {
-            let builder = LLVMCreateBuilderInContext(context);
-            // common types
-            let i32_type = LLVMInt32TypeInContext(context);
-            // Get the type signature for void nop(void);
-            // Then create it in our module.
-            // let void = llvm::core::LLVMVoidTypeInContext(context);
-            let function_type = llvm::core::LLVMFunctionType(i32_type, ptr::null_mut(), 0, 0);
-            let function = llvm::core::LLVMAddFunction(
-                module,
-                b"getTwo\0".as_ptr() as *const _,
-                function_type,
-            );
+        Ok(())
+    }
 
-            // Create a basic block in the function and set our builder to generate
-            // code in it.
-            let bb = llvm::core::LLVMAppendBasicBlockInContext(
-                context,
-                function,
-                b"entry\0".as_ptr() as *const _,
-            );
-            llvm::core::LLVMPositionBuilderAtEnd(builder, bb);
-
-            LLVMBuildRet(builder, LLVMConstInt(i32_type, 42, 0));
-
-            LLVMDisposeBuilder(builder);
+    fn generate_program<'a>(
+        env: &mut Env,
+        program: &Program,
+        scopes: &HashMap<ScopeId, Scope<NodeId>>,
+    ) -> Result<(), CodeGenFailure> {
+        let mut result: Result<(), CodeGenFailure> = Ok(());
+        let mut iter = program.statements.iter();
+        while let Some(statement) = iter.next() {
+            result = generate_statement(env, statement, scopes);
+            if let Err(_) = result {
+                break;
+            }
+        }
+        result.and_then(|_| unsafe {
             {
                 // verify module is valid
                 let mut out_error = MaybeUninit::<*mut libc::c_char>::uninit();
                 match LLVMVerifyModule(
-                    module,
+                    env.module,
                     LLVMVerifierFailureAction::LLVMReturnStatusAction,
                     out_error.as_mut_ptr(),
                 ) {
@@ -1255,15 +1261,29 @@ mod codegen {
                     }),
                 }
             }
-        }
+        })
     }
 
-    fn try_generate<'a>() -> Result<&'a [u8], CodeGenFailure> {
+    fn try_generate<'a>(
+        file_name: &str,
+        program: &Program,
+        scopes: &HashMap<ScopeId, Scope<NodeId>>,
+    ) -> Result<&'a [u8], CodeGenFailure> {
         unsafe {
-            // setup
-            let module = LLVMModuleCreateWithName(c_str!("main"));
+            let module =
+                LLVMModuleCreateWithName(CString::new(file_name).expect("CString failed").as_ptr());
             let context = LLVMGetModuleContext(module);
-            let result = match generate_program(module, context) {
+            let builder = LLVMCreateBuilderInContext(context);
+            let mut env = Env {
+                module,
+                context,
+                builder,
+                types: Types {
+                    int_32: LLVMInt32TypeInContext(context),
+                },
+            };
+            // setup
+            let result = match generate_program(&mut env, program, scopes) {
                 Err(e) => Err(e),
                 Ok(_) => {
                     LLVMInitializeWebAssemblyTargetInfo();
@@ -1339,14 +1359,19 @@ mod codegen {
                 }
             };
 
-            LLVMDisposeModule(module);
-            LLVMContextDispose(context);
+            LLVMDisposeModule(env.module);
+            LLVMContextDispose(env.context);
+            LLVMDisposeBuilder(env.builder);
             result
         }
     }
 
-    pub fn generate<'a>() -> Result<&'a [u8], Failure> {
-        match try_generate() {
+    pub fn generate<'a>(
+        file_name: &str,
+        program: &Program,
+        scopes: &HashMap<ScopeId, Scope<NodeId>>,
+    ) -> Result<&'a [u8], Failure> {
+        match try_generate(file_name, program, scopes) {
             Err(e) => Err(Failure::CodeGen(e)),
             Ok(buf) => Ok(buf),
         }
@@ -1359,7 +1384,7 @@ mod linker {
     use std::process::Command;
     use tempfile::NamedTempFile;
 
-    fn try_link(file_name: &String, buffer: &[u8]) -> Result<(), LinkFailure> {
+    fn try_link(file_name: &str, buffer: &[u8]) -> Result<(), LinkFailure> {
         let mut obj_file = NamedTempFile::new()?;
         obj_file.write_all(buffer)?;
         // @TODO make this either call a C method or bundle lld in out dir binary
@@ -1377,7 +1402,7 @@ mod linker {
         Ok(())
     }
 
-    pub fn link(file_name: &String, buffer: &[u8]) -> Result<(), Failure> {
+    pub fn link(file_name: &str, buffer: &[u8]) -> Result<(), Failure> {
         match try_link(file_name, buffer) {
             Err(e) => Err(Failure::Link(e)),
             Ok(_) => Ok(()),
@@ -1391,11 +1416,20 @@ struct Cli {
     path: std::path::PathBuf,
 }
 
+use std::fs;
+
 fn main() {
-    // let args = Cli::from_args();
+    let args = Cli::from_args();
     // println!("{:#?}", args);
-    codegen::generate()
-        .and_then(|buf| linker::link(&String::from("main"), buf))
-        .expect("Something failed");
-    println!("Hello, world!");
+    let input = fs::read_to_string(&args.path).expect("input file not found");
+    let name = args.path.file_stem().map(|n| n.to_str()).flatten().unwrap();
+    match lexer::lex(&input)
+        .and_then(parser::parse)
+        .and_then(typecheck::typecheck)
+        .and_then(|res| codegen::generate(name, &res.program, &res.scopes))
+        .and_then(|buf| linker::link(name, buf))
+    {
+        Ok(_) => println!("✅ Done"),
+        Err(e) => println!("❌ {}", e.message()),
+    }
 }
