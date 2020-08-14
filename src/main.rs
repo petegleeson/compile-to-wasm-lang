@@ -183,7 +183,7 @@ mod lexer {
                         loc: ((line, col), (line, col)),
                     }),
                 },
-                ' ' => match pending {
+                ' ' | '\n' => match pending {
                     Some(token) => {
                         tokens.push(token);
                         pending = None;
@@ -817,7 +817,7 @@ mod ast {
     pub struct Number {
         pub uid: NodeId,
         pub loc: Location,
-        pub value: String,
+        pub value: i32,
         pub ty: Type,
     }
 
@@ -1074,7 +1074,7 @@ mod typecheck {
             loc: number.location(),
             uid: number.node_id(),
             ty: *solved.get(&number.node_id()).unwrap(),
-            value: number.value,
+            value: number.value.parse().unwrap(),
         }
     }
 
@@ -1203,7 +1203,6 @@ mod codegen {
     use std::collections::HashMap;
     use std::ffi::CString;
     use std::mem::MaybeUninit;
-    use std::ptr;
     use std::slice;
 
     macro_rules! c_str {
@@ -1222,15 +1221,47 @@ mod codegen {
         builder: LLVMBuilderRef,
         types: Types,
     }
-    fn generate_statement<'a>(
+
+    fn generate_number(env: &mut Env, number: &Number) -> Result<LLVMValueRef, CodeGenFailure> {
+        unsafe { Ok(LLVMConstInt(env.types.int_32, number.value as u64, 0)) }
+    }
+
+    fn generate_declaration(
+        env: &mut Env,
+        declaration: &Declaration,
+        scopes: &HashMap<ScopeId, Scope<NodeId>>,
+    ) -> Result<(), CodeGenFailure> {
+        let id_name = CString::new(declaration.id.value.clone()).unwrap();
+        match &declaration.value {
+            Expression::Number(n) => {
+                generate_number(env, &n).and_then(|ll_num| match scopes.get(&declaration.scope) {
+                    Some(Scope::Global { .. }) => unsafe {
+                        let g = LLVMAddGlobal(env.module, env.types.int_32, id_name.as_ptr());
+                        LLVMSetInitializer(g, ll_num);
+                        Ok(())
+                    },
+                    _ => Err(CodeGenFailure {
+                        message: String::from("Don't know how to codegen this"),
+                    }),
+                })
+            }
+            Expression::Identifier(_) => Err(CodeGenFailure {
+                message: String::from("Don't know how to codegen this"),
+            }),
+        }
+    }
+
+    fn generate_statement(
         env: &mut Env,
         statement: &Statement,
         scopes: &HashMap<ScopeId, Scope<NodeId>>,
     ) -> Result<(), CodeGenFailure> {
-        Ok(())
+        match statement {
+            Statement::Declaration(d) => generate_declaration(env, d, scopes),
+        }
     }
 
-    fn generate_program<'a>(
+    fn generate_program(
         env: &mut Env,
         program: &Program,
         scopes: &HashMap<ScopeId, Scope<NodeId>>,
