@@ -8,3 +8,5 @@
 *.s
 *.wasm
 *.wat
+*.ll
+*.src

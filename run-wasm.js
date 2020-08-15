@@ -6,7 +6,6 @@ if (fs.existsSync(file)) {
   WebAssembly.instantiate(fs.readFileSync(file))
     .then((module) => {
       console.log(module.instance.exports);
-      // console.log(module.instance.exports.x.value);
       if (fn) {
         console.log(module.instance.exports[fn](...args));
       }

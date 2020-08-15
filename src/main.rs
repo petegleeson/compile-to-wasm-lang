@@ -1250,7 +1250,7 @@ mod codegen {
                 let rhs_value = LLVMGetNamedGlobal(env.module, rhs_name.as_ptr());
                 // @Idea could also create this type from rhs_id.ty
                 let rhs_type = LLVMGlobalGetValueType(rhs_value);
-                let g = LLVMAddGlobal(env.module, rhs_type, id_name.as_ptr());
+                let g = LLVMAddGlobal(env.module, LLVMPointerType(rhs_type, 0), id_name.as_ptr());
                 LLVMSetInitializer(g, rhs_value);
                 Ok(())
             },
