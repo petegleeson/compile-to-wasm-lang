@@ -1245,9 +1245,15 @@ mod codegen {
                     }),
                 })
             }
-            Expression::Identifier(_) => Err(CodeGenFailure {
-                message: String::from("Don't know how to codegen this"),
-            }),
+            Expression::Identifier(rhs_id) => unsafe {
+                let rhs_name = CString::new(rhs_id.value.clone()).unwrap();
+                let rhs_value = LLVMGetNamedGlobal(env.module, rhs_name.as_ptr());
+                // @Idea could also create this type from rhs_id.ty
+                let rhs_type = LLVMGlobalGetValueType(rhs_value);
+                let g = LLVMAddGlobal(env.module, rhs_type, id_name.as_ptr());
+                LLVMSetInitializer(g, rhs_value);
+                Ok(())
+            },
         }
     }
 
@@ -1407,6 +1413,52 @@ mod codegen {
             Ok(buf) => Ok(buf),
         }
     }
+
+    fn try_show(
+        file_name: &str,
+        program: &Program,
+        scopes: &HashMap<ScopeId, Scope<NodeId>>,
+    ) -> Result<(), CodeGenFailure> {
+        unsafe {
+            let module =
+                LLVMModuleCreateWithName(CString::new(file_name).expect("CString failed").as_ptr());
+            let context = LLVMGetModuleContext(module);
+            let builder = LLVMCreateBuilderInContext(context);
+            let mut env = Env {
+                module,
+                context,
+                builder,
+                types: Types {
+                    int_32: LLVMInt32TypeInContext(context),
+                },
+            };
+            // setup
+            let result = match generate_program(&mut env, program, scopes) {
+                Err(e) => Err(e),
+                Ok(_) => {
+                    LLVMDumpModule(env.module);
+                    println!("");
+                    Ok(())
+                }
+            };
+
+            LLVMDisposeModule(env.module);
+            LLVMContextDispose(env.context);
+            LLVMDisposeBuilder(env.builder);
+            result
+        }
+    }
+
+    pub fn show(
+        file_name: &str,
+        program: &Program,
+        scopes: &HashMap<ScopeId, Scope<NodeId>>,
+    ) -> Result<(), Failure> {
+        match try_show(file_name, program, scopes) {
+            Err(e) => Err(Failure::CodeGen(e)),
+            Ok(x) => Ok(x),
+        }
+    }
 }
 
 mod linker {
@@ -1443,6 +1495,10 @@ mod linker {
 
 #[derive(Debug, StructOpt)]
 struct Cli {
+    // outputs the intermediate representation
+    #[structopt(long)]
+    ir: bool,
+    // input file
     #[structopt(parse(from_os_str))]
     path: std::path::PathBuf,
 }
@@ -1452,14 +1508,20 @@ use std::fs;
 fn main() {
     let args = Cli::from_args();
     // println!("{:#?}", args);
+    let ir = args.ir;
     let input = fs::read_to_string(&args.path).expect("input file not found");
     let name = args.path.file_stem().map(|n| n.to_str()).flatten().unwrap();
     match lexer::lex(&input)
         .and_then(parser::parse)
         .and_then(typecheck::typecheck)
-        .and_then(|res| codegen::generate(name, &res.program, &res.scopes))
-        .and_then(|buf| linker::link(name, buf))
-    {
+        .and_then(|res| {
+            if ir {
+                codegen::show(name, &res.program, &res.scopes)
+            } else {
+                codegen::generate(name, &res.program, &res.scopes)
+                    .and_then(|buf| linker::link(name, buf))
+            }
+        }) {
         Ok(_) => println!("✅ Done"),
         Err(e) => println!("❌ {}", e.message()),
     }
