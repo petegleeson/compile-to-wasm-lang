@@ -77,6 +77,11 @@ mod lexer {
         Equals { loc: Location },
         Number { loc: Location, value: String },
         SemiColon { loc: Location },
+        LParen { loc: Location },
+        RParen { loc: Location },
+        LCurly { loc: Location },
+        RCurly { loc: Location },
+        Comma { loc: Location },
     }
 
     impl Locatable for Token {
@@ -86,17 +91,39 @@ mod lexer {
                 Token::Equals { loc } => *loc,
                 Token::Number { loc, .. } => *loc,
                 Token::SemiColon { loc } => *loc,
+                Token::LCurly { loc } => *loc,
+                Token::RCurly { loc } => *loc,
+                Token::LParen { loc } => *loc,
+                Token::RParen { loc } => *loc,
+                Token::Comma { loc } => *loc,
             }
         }
     }
 
     impl Token {
+        fn from(c: char, loc: Location) -> Token {
+            match c {
+                '=' => Token::Equals { loc },
+                ';' => Token::SemiColon { loc },
+                '(' => Token::LParen { loc },
+                ')' => Token::RParen { loc },
+                '{' => Token::LCurly { loc },
+                '}' => Token::RCurly { loc },
+                ',' => Token::Comma { loc },
+                _ => panic!(println!("Internal error: cannot create token for {}", c)),
+            }
+        }
         pub fn value(&self) -> String {
             match &self {
                 Token::Identifier { value, .. } => value.clone(),
                 Token::Equals { .. } => String::from("="),
                 Token::Number { value, .. } => value.clone(),
                 Token::SemiColon { .. } => String::from(";"),
+                Token::LParen { .. } => String::from("("),
+                Token::RParen { .. } => String::from(")"),
+                Token::LCurly { .. } => String::from("{"),
+                Token::RCurly { .. } => String::from("}"),
+                Token::Comma { .. } => String::from(","),
             }
         }
     }
@@ -159,30 +186,13 @@ mod lexer {
                         })
                     }
                 },
-                ';' => match pending {
-                    Some(token) => {
+                ';' | '=' | '(' | ')' | '{' | '}' | ',' => {
+                    if let Some(token) = pending {
                         tokens.push(token);
                         pending = None;
-                        tokens.push(Token::SemiColon {
-                            loc: ((line, col), (line, col)),
-                        })
-                    }
-                    None => tokens.push(Token::SemiColon {
-                        loc: ((line, col), (line, col)),
-                    }),
-                },
-                '=' => match pending {
-                    Some(token) => {
-                        tokens.push(token);
-                        pending = None;
-                        tokens.push(Token::Equals {
-                            loc: ((line, col), (line, col)),
-                        })
-                    }
-                    None => tokens.push(Token::Equals {
-                        loc: ((line, col), (line, col)),
-                    }),
-                },
+                    };
+                    tokens.push(Token::from(c, ((line, col), (line, col))));
+                }
                 ' ' | '\n' => match pending {
                     Some(token) => {
                         tokens.push(token);
@@ -419,6 +429,27 @@ mod parser {
     }
 
     #[derive(Debug, PartialEq)]
+    pub struct Function {
+        uid: NodeId,
+        loc: Location,
+        pub scope: ScopeId,
+        pub args: Vec<Identifier>,
+        pub body: Vec<Statement>,
+    }
+
+    impl Locatable for Function {
+        fn location(&self) -> Location {
+            self.loc
+        }
+    }
+
+    impl Node for Function {
+        fn node_id(&self) -> NodeId {
+            self.uid
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
     pub struct Program {
         uid: NodeId,
         loc: Location,
@@ -484,6 +515,7 @@ mod parser {
     pub enum Expression {
         Number(Number),
         Identifier(Identifier),
+        Function(Function),
     }
 
     impl Locatable for Expression {
@@ -491,6 +523,7 @@ mod parser {
             match self {
                 Expression::Number(n) => n.location(),
                 Expression::Identifier(id) => id.location(),
+                Expression::Function(func) => func.location(),
             }
         }
     }
@@ -500,6 +533,7 @@ mod parser {
             match self {
                 Expression::Number(n) => n.node_id(),
                 Expression::Identifier(id) => id.node_id(),
+                Expression::Function(func) => func.node_id(),
             }
         }
     }
@@ -561,6 +595,27 @@ mod parser {
                     }
                 }
             }
+        }
+
+        fn push_scope(&mut self) -> ScopeId {
+            let scope_id = self.uid();
+            self.scopes.insert(
+                scope_id,
+                Scope::Local {
+                    parent: self.current_scope,
+                    bindings: HashMap::new(),
+                },
+            );
+            self.current_scope = scope_id;
+            scope_id
+        }
+
+        fn pop_scope(&mut self) -> ScopeId {
+            self.current_scope = match self.get_scope(self.current_scope) {
+                Scope::Local { parent, .. } => *parent,
+                _ => panic!("Internal error: tried to pop scope from global scope"),
+            };
+            self.current_scope
         }
 
         fn add_binding(&mut self, id: String, node_id: NodeId) -> Option<NodeId> {
@@ -653,6 +708,98 @@ mod parser {
         })
     }
 
+    fn parse_function(tokens: &mut TokenIterator, env: &mut Env) -> Result<Function, ParseFailure> {
+        let (start, end) = tokens.location();
+        let uid = env.uid();
+        let scope = env.current_scope;
+        env.push_scope();
+
+        fn parse_args(
+            function_id: i32,
+            tokens: &mut TokenIterator,
+            env: &mut Env,
+        ) -> Result<Vec<Identifier>, ParseFailure> {
+            let mut args = Vec::new();
+            loop {
+                match tokens.peek_token() {
+                    Some(Token::LParen { .. }) => {
+                        tokens.next_token();
+                        continue;
+                    }
+                    Some(Token::RParen { .. }) => {
+                        tokens.next_token();
+                        break Ok(args);
+                    }
+                    Some(Token::Identifier { value, .. }) => {
+                        env.add_binding(value.to_string(), function_id);
+                        match parse_identifier(tokens, env) {
+                            Ok(ident) => {
+                                args.push(ident);
+                                // check for more args
+                                match tokens.peek_token() {
+                                    Some(Token::Comma { .. }) => {
+                                        tokens.next_token();
+                                        continue;
+                                    }
+                                    _ => break Ok(args),
+                                }
+                            }
+                            Err(e) => break Err(e),
+                        }
+                    }
+                    _ => {
+                        break Err(ParseFailure {
+                            loc: tokens.location(),
+                            message: format!(
+                                "Expected function arguments to be comma separated Identifiers"
+                            ),
+                        });
+                    }
+                }
+            }
+        };
+
+        fn parse_body(
+            tokens: &mut TokenIterator,
+            env: &mut Env,
+        ) -> Result<Vec<Statement>, ParseFailure> {
+            let mut statements = Vec::new();
+            loop {
+                match tokens.peek_token() {
+                    Some(Token::RCurly { .. }) => {
+                        tokens.next_token();
+                        break Ok(statements);
+                    }
+                    Some(_) => match parse_statement(tokens, env) {
+                        Ok(statement) => {
+                            statements.push(statement);
+                        }
+                        Err(e) => break Err(e),
+                    },
+                    None => {
+                        break Err(ParseFailure {
+                            loc: tokens.location(),
+                            message: String::from("Expected '}' at end of function expression"),
+                        })
+                    }
+                }
+            }
+        };
+
+        parse_args(uid, tokens, env)
+            .and_then(|args| parse_body(tokens, env).map(|body| (args, body)))
+            .map(|(args, body)| {
+                env.pop_scope();
+                Function {
+                    loc: (start, end),
+                    uid,
+                    scope,
+                    args,
+                    body,
+                }
+            })
+    }
+
     fn parse_expression(
         tokens: &mut TokenIterator,
         env: &mut Env,
@@ -663,6 +810,7 @@ mod parser {
                 parse_identifier(tokens, env).map(Expression::Identifier)
             }
             Some(Token::Number { .. }) => parse_number(tokens, env).map(Expression::Number),
+            Some(Token::LParen { .. }) => parse_function(tokens, env).map(Expression::Function),
             _ => Err(ParseFailure {
                 loc,
                 message: String::from("Expected expression"),
