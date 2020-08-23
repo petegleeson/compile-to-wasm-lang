@@ -546,6 +546,19 @@ mod parser {
         pub scopes: Scopes,
     }
 
+    impl ParseResult {
+        // @Improve - how to make this generic?
+        pub fn find_declaration(&self, id: &NodeId) -> Option<&Declaration> {
+            self.program
+                .statements
+                .iter()
+                .find_map(|statement| match statement {
+                    Statement::Declaration(decl) if decl.node_id() == *id => Some(decl),
+                    _ => None,
+                })
+        }
+    }
+
     // collection of mutable data used during parse tree creation
     struct Env {
         // next uid
@@ -1050,56 +1063,33 @@ mod typecheck {
 
     use Constraint::*;
     use Type::*;
-    /*
-    fn apply_substitution(subst: Substitution, ty: &Type) -> Type {
-        match (subst, ty) {
-            ((Type::Var(y), replacement), Type::Var(x)) if *x == y => replacement,
-            (_, Type::I32) => *ty,
-            (_, Type::Void) => *ty,
-            (_, Type::Var(_)) => *ty,
-        }
-    }
-    */
 
-    fn extend_subst(
-        id: i32,
-        replacement: Type,
-        mut subst: Vec<Binding>,
-    ) -> Result<Vec<Binding>, TypeCheckFailure> {
-        let mut extended_subst: Vec<Binding> = subst
-            .into_iter()
-            .map(|binding| match binding {
-                // @FIX type errors happen here
-                (lhs, Var(y)) if y == id => (lhs, replacement.clone()),
-                _ => binding,
-            })
-            .collect();
-        extended_subst.push((id, replacement));
-        Ok(extended_subst)
-    }
-
-    fn update_constraints(
-        id: i32,
-        replacement: &Type,
-        mut constraints: Vec<Constraint>,
-    ) -> Result<Vec<Constraint>, TypeCheckFailure> {
-        use Constraint::*;
+    fn substitute(id: i32, replacement: &Type, source: Type) -> Type {
         use Type::*;
-        Ok(constraints
-            .into_iter()
-            .map(|constraint| match constraint {
-                // @FIX type errors happen here
-                Eq(lhs, Var(y)) if y == id => Eq(lhs, replacement.clone()),
-                Eq(Var(y), rhs) if y == id => Eq(replacement.clone(), rhs),
-                _ => constraint,
-            })
-            .collect())
+        match source {
+            I32 => source,
+            Void => source,
+            Var(y) => {
+                if y == id {
+                    replacement.clone()
+                } else {
+                    source
+                }
+            }
+            Function { args, ret } => Function {
+                args: args
+                    .into_iter()
+                    .map(|t| substitute(id, replacement, t))
+                    .collect(),
+                ret: Box::new(substitute(id, replacement, *ret)),
+            },
+        }
     }
 
     fn unify_constraints(constraints: Vec<Constraint>) -> Result<Substitution, TypeCheckFailure> {
         fn unify(
             mut constraints: Vec<Constraint>,
-            mut subst: Vec<Binding>,
+            subst: Vec<Binding>,
         ) -> Result<Vec<Binding>, TypeCheckFailure> {
             match constraints.pop() {
                 None => Ok(subst),
@@ -1108,16 +1098,27 @@ mod typecheck {
                 Some(Eq(Void, Void)) => unify(constraints, subst),
                 Some(Eq(x, y)) if x == y => unify(constraints, subst),
                 // useful constraints
-                Some(Eq(Var(x), ty)) => update_constraints(x, &ty, constraints)
-                    .and_then(|updated_constraints| match extend_subst(x, ty, subst) {
-                        Ok(extended_subst) => Ok((updated_constraints, extended_subst)),
-                        Err(e) => Err(e),
-                    })
-                    .and_then(|(constraints, subst)| unify(constraints, subst)),
+                Some(Eq(Var(x), ty)) => unify(
+                    constraints
+                        .into_iter()
+                        // @Fix occurs check - no var in lhs occurs in ty
+                        .map(|Eq(lhs, rhs)| Eq(lhs, substitute(x, &ty, rhs)))
+                        .collect(),
+                    {
+                        let mut next_subst: Vec<Binding> = subst
+                            .into_iter()
+                            // @Fix occurs check - id does not in ty
+                            .map(|(id, rhs)| (id, substitute(x, &ty, rhs)))
+                            .collect();
+                        next_subst.push((x, ty));
+                        next_subst
+                    },
+                ),
                 Some(Eq(ty, Var(x))) => {
                     constraints.push(Eq(Var(x), ty));
                     unify(constraints, subst)
                 }
+                // invalid constraints
                 Some(Eq(t1, t2)) => Err(TypeCheckFailure {
                     message: format!("Types to not unify {:?}, {:?}", t1, t2),
                 }),
@@ -1130,12 +1131,12 @@ mod typecheck {
     fn it_solves_substitutions() {
         assert_eq!(
             unify_constraints(vec![Eq(Var(2), Var(1)), Eq(Var(1), I32)],),
-            {
+            Ok({
                 let mut res = HashMap::new();
                 res.insert(1, Type::I32);
                 res.insert(2, Type::I32);
                 res
-            }
+            })
         );
     }
 
@@ -1146,12 +1147,12 @@ mod typecheck {
                 Eq(Type::Var(2), Type::Var(1)),
                 Eq(Type::Var(1), Type::Void)
             ],),
-            {
+            Ok({
                 let mut res = HashMap::new();
                 res.insert(1, Type::Void);
                 res.insert(2, Type::Void);
                 res
-            }
+            })
         );
     }
 
@@ -1162,12 +1163,12 @@ mod typecheck {
                 Eq(Type::Var(1), Type::I32),
                 Eq(Type::Var(2), Type::Var(1))
             ],),
-            {
+            Ok({
                 let mut res = HashMap::new();
                 res.insert(1, Type::I32);
                 res.insert(2, Type::I32);
                 res
-            }
+            })
         );
     }
 
@@ -1178,24 +1179,55 @@ mod typecheck {
                 Eq(Type::Var(1), Type::I32),
                 Eq(Type::Var(1), Type::I32)
             ],),
-            {
+            Ok({
                 let mut res = HashMap::new();
                 res.insert(1, Type::I32);
                 res
-            }
+            })
+        );
+    }
+
+    #[test]
+    fn it_substitutes_function_return() {
+        assert_eq!(
+            unify_constraints(vec![
+                Eq(
+                    Type::Var(1),
+                    Type::Function {
+                        args: vec![],
+                        ret: Box::new(Var(2))
+                    }
+                ),
+                Eq(Type::Var(2), Type::I32)
+            ],),
+            Ok({
+                let mut res = HashMap::new();
+                res.insert(
+                    1,
+                    Type::Function {
+                        args: vec![],
+                        ret: Box::new(I32),
+                    },
+                );
+                res.insert(2, Type::I32);
+                res
+            })
         );
     }
 
     fn generate_constraints_identifier(
         identifier: &parser::Identifier,
-        scopes: &parser::Scopes,
+        result: &parser::ParseResult,
     ) -> Vec<Constraint> {
-        match scopes
+        match result
+            .scopes
             .get(&identifier.scope)
             .map(|scope| scope.bindings().get(&identifier.value))
             .flatten()
+            .map(|binding_id| result.find_declaration(binding_id))
+            .flatten()
         {
-            Some(parent_node_id) => vec![Eq(Var(identifier.node_id()), Var(*parent_node_id))],
+            Some(binding) => vec![Eq(Var(identifier.node_id()), Var(binding.id.node_id()))],
             None => vec![],
         }
     }
@@ -1206,14 +1238,14 @@ mod typecheck {
 
     fn generate_constraints_function(
         function: &parser::Function,
-        scopes: &parser::Scopes,
+        result: &parser::ParseResult,
     ) -> Vec<Constraint> {
         let mut constraints = Vec::new();
         for arg in &function.args {
-            constraints.append(&mut generate_constraints_identifier(arg, &scopes));
+            constraints.append(&mut generate_constraints_identifier(arg, result));
         }
         for statement in &function.body {
-            constraints.append(&mut generate_constraints_statement(statement, &scopes));
+            constraints.append(&mut generate_constraints_statement(statement, result));
         }
         constraints.push(Eq(
             Var(function.node_id()),
@@ -1231,27 +1263,27 @@ mod typecheck {
 
     fn generate_constraints_expression(
         expression: &parser::Expression,
-        scopes: &parser::Scopes,
+        result: &parser::ParseResult,
     ) -> Vec<Constraint> {
         match expression {
-            parser::Expression::Function(expr) => generate_constraints_function(expr, scopes),
+            parser::Expression::Function(expr) => generate_constraints_function(expr, result),
             parser::Expression::Number(expr) => generate_constraints_number(expr),
-            parser::Expression::Identifier(expr) => generate_constraints_identifier(expr, scopes),
+            parser::Expression::Identifier(expr) => generate_constraints_identifier(expr, result),
         }
     }
 
     fn generate_constraints_declaration(
         declaration: &parser::Declaration,
-        scopes: &parser::Scopes,
+        result: &parser::ParseResult,
     ) -> Vec<Constraint> {
         let mut constraints = Vec::new();
         constraints.append(&mut generate_constraints_identifier(
             &declaration.id,
-            scopes,
+            result,
         ));
         constraints.append(&mut generate_constraints_expression(
             &declaration.value,
-            scopes,
+            result,
         ));
         constraints.push(Eq(Type::Var(declaration.node_id()), Type::Void));
         constraints.push(Eq(
@@ -1263,10 +1295,10 @@ mod typecheck {
 
     fn generate_constraints_statement(
         statement: &parser::Statement,
-        scopes: &parser::Scopes,
+        result: &parser::ParseResult,
     ) -> Vec<Constraint> {
         match statement {
-            parser::Statement::Declaration(d) => generate_constraints_declaration(d, scopes),
+            parser::Statement::Declaration(d) => generate_constraints_declaration(d, result),
         }
     }
 
@@ -1275,7 +1307,7 @@ mod typecheck {
             .program
             .statements
             .iter()
-            .flat_map(|s| generate_constraints_statement(s, &result.scopes))
+            .flat_map(|s| generate_constraints_statement(s, &result))
             .collect()
     }
 
@@ -1412,7 +1444,7 @@ mod typecheck {
         .and_then(typecheck)
         {
             Ok(ast) => insta::assert_debug_snapshot!(ast),
-            Err(_) => panic!("typecheck failed"),
+            Err(e) => panic!("typecheck failed {:?}", e),
         }
     }
 }
@@ -1495,6 +1527,7 @@ mod codegen {
                 LLVMSetInitializer(g, rhs_value);
                 Ok(())
             },
+            Expression::Function(func) => unsafe { Ok(()) },
         }
     }
 
