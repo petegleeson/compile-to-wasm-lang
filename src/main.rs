@@ -453,7 +453,7 @@ mod parser {
     pub struct Program {
         uid: NodeId,
         loc: Location,
-        pub statements: Vec<Statement>,
+        pub statements: Vec<Declaration>,
         pub scope: ScopeId,
     }
 
@@ -493,12 +493,14 @@ mod parser {
     #[derive(Debug, PartialEq)]
     pub enum Statement {
         Declaration(Declaration),
+        Expression(Expression),
     }
 
     impl Locatable for Statement {
         fn location(&self) -> Location {
             match self {
                 Statement::Declaration(d) => d.location(),
+                Statement::Expression(e) => e.location(),
             }
         }
     }
@@ -507,6 +509,7 @@ mod parser {
         fn node_id(&self) -> NodeId {
             match self {
                 Statement::Declaration(d) => d.node_id(),
+                Statement::Expression(e) => e.node_id(),
             }
         }
     }
@@ -549,13 +552,13 @@ mod parser {
     impl ParseResult {
         // @Improve - how to make this generic?
         pub fn find_declaration(&self, id: &NodeId) -> Option<&Declaration> {
-            self.program
-                .statements
-                .iter()
-                .find_map(|statement| match statement {
-                    Statement::Declaration(decl) if decl.node_id() == *id => Some(decl),
-                    _ => None,
-                })
+            self.program.statements.iter().find_map(|decl| {
+                if decl.node_id() == *id {
+                    Some(decl)
+                } else {
+                    None
+                }
+            })
         }
     }
 
@@ -891,7 +894,8 @@ mod parser {
             Some(Token::Identifier { value, .. }) if value == "let" => {
                 parse_declaration(tokens, env).map(Statement::Declaration)
             }
-            _ => Err(ParseFailure {
+            Some(_) => parse_expression(tokens, env).map(Statement::Expression),
+            None => Err(ParseFailure {
                 loc: tokens.location(),
                 message: String::from("Expected statement"),
             }),
@@ -914,14 +918,22 @@ mod parser {
             },
         );
         let uid = env.uid();
-        let mut statements = Vec::new();
+        let mut declarations = Vec::new();
         let mut end = (1, 1);
         loop {
             match token_iter.peek_token() {
-                Some(_) => match parse_statement(&mut token_iter, &mut env) {
-                    Ok(statement) => {
-                        end = statement.location().1;
-                        statements.push(statement);
+                Some(_) => match parse_declaration(&mut token_iter, &mut env).and_then(|decl| {
+                    match token_iter.next_token() {
+                        Some(Token::SemiColon { .. }) => Ok(decl),
+                        _ => Err(ParseFailure {
+                            loc: token_iter.location(),
+                            message: String::from("Expected ';'"),
+                        }),
+                    }
+                }) {
+                    Ok(declaration) => {
+                        end = declaration.location().1;
+                        declarations.push(declaration);
                     }
                     Err(e) => break Err(Failure::Parse(e)),
                 },
@@ -931,7 +943,7 @@ mod parser {
                             uid,
                             scope: 1,
                             loc: ((1, 1), end),
-                            statements,
+                            statements: declarations,
                         },
                         scopes: env.scopes,
                     })
@@ -998,7 +1010,7 @@ mod ast {
     pub struct Program {
         pub uid: NodeId,
         pub loc: Location,
-        pub statements: Vec<Statement>,
+        pub statements: Vec<Declaration>,
         pub scope: ScopeId,
     }
 
@@ -1025,6 +1037,7 @@ mod ast {
     #[derive(Debug, PartialEq)]
     pub enum Statement {
         Declaration(Declaration),
+        Expression(Expression),
     }
 
     #[derive(Debug, PartialEq)]
@@ -1302,6 +1315,7 @@ mod typecheck {
     ) -> Vec<Constraint> {
         match statement {
             parser::Statement::Declaration(d) => generate_constraints_declaration(d, result),
+            parser::Statement::Expression(e) => generate_constraints_expression(e, result),
         }
     }
 
@@ -1310,7 +1324,7 @@ mod typecheck {
             .program
             .statements
             .iter()
-            .flat_map(|s| generate_constraints_statement(s, &result))
+            .flat_map(|d| generate_constraints_declaration(d, &result))
             .collect()
     }
 
@@ -1389,6 +1403,9 @@ mod typecheck {
             parser::Statement::Declaration(d) => {
                 ast::Statement::Declaration(apply_subst_declaration(d, subst))
             }
+            parser::Statement::Expression(e) => {
+                ast::Statement::Expression(apply_subst_expression(e, subst))
+            }
         }
     }
 
@@ -1400,7 +1417,7 @@ mod typecheck {
             statements: program
                 .statements
                 .into_iter()
-                .map(|s| apply_subst_statement(s, subst))
+                .map(|d| apply_subst_declaration(d, subst))
                 .collect(),
         }
     }
@@ -1541,6 +1558,9 @@ mod codegen {
     ) -> Result<(), CodeGenFailure> {
         match statement {
             Statement::Declaration(d) => generate_declaration(env, d, scopes),
+            _ => Err(CodeGenFailure {
+                message: String::from("Don't know how to codegen this"),
+            }),
         }
     }
 
@@ -1551,8 +1571,8 @@ mod codegen {
     ) -> Result<(), CodeGenFailure> {
         let mut result: Result<(), CodeGenFailure> = Ok(());
         let mut iter = program.statements.iter();
-        while let Some(statement) = iter.next() {
-            result = generate_statement(env, statement, scopes);
+        while let Some(declaration) = iter.next() {
+            result = generate_declaration(env, declaration, scopes);
             if let Err(_) = result {
                 break;
             }

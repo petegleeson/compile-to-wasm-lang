@@ -16,56 +16,54 @@ TypeCheckResult {
             ),
         ),
         statements: [
-            Declaration(
-                Declaration {
-                    uid: 3,
+            Declaration {
+                uid: 3,
+                loc: (
+                    (
+                        1,
+                        1,
+                    ),
+                    (
+                        1,
+                        11,
+                    ),
+                ),
+                id: Identifier {
+                    uid: 4,
                     loc: (
                         (
                             1,
-                            1,
+                            5,
                         ),
                         (
                             1,
-                            11,
+                            5,
                         ),
                     ),
-                    id: Identifier {
-                        uid: 4,
+                    value: "x",
+                    scope: 1,
+                    ty: I32,
+                },
+                value: Number(
+                    Number {
+                        uid: 5,
                         loc: (
                             (
                                 1,
-                                5,
+                                9,
                             ),
                             (
                                 1,
-                                5,
+                                10,
                             ),
                         ),
-                        value: "x",
-                        scope: 1,
+                        value: 12,
                         ty: I32,
                     },
-                    value: Number(
-                        Number {
-                            uid: 5,
-                            loc: (
-                                (
-                                    1,
-                                    9,
-                                ),
-                                (
-                                    1,
-                                    10,
-                                ),
-                            ),
-                            value: 12,
-                            ty: I32,
-                        },
-                    ),
-                    scope: 1,
-                    ty: Void,
-                },
-            ),
+                ),
+                scope: 1,
+                ty: Void,
+            },
         ],
         scope: 1,
     },
