@@ -779,6 +779,9 @@ mod parser {
             let mut statements = Vec::new();
             loop {
                 match tokens.peek_token() {
+                    Some(Token::LCurly { .. }) => {
+                        tokens.next_token();
+                    }
                     Some(Token::RCurly { .. }) => {
                         tokens.next_token();
                         break Ok(statements);
@@ -1772,6 +1775,9 @@ struct Cli {
     // outputs the intermediate representation
     #[structopt(long)]
     ir: bool,
+    // outputs the parse tree representation
+    #[structopt(long)]
+    ast: bool,
     // input file
     #[structopt(parse(from_os_str))]
     path: std::path::PathBuf,
@@ -1782,14 +1788,15 @@ use std::fs;
 fn main() {
     let args = Cli::from_args();
     // println!("{:#?}", args);
-    let ir = args.ir;
     let input = fs::read_to_string(&args.path).expect("input file not found");
     let name = args.path.file_stem().map(|n| n.to_str()).flatten().unwrap();
     match lexer::lex(&input)
         .and_then(parser::parse)
         .and_then(typecheck::typecheck)
         .and_then(|res| {
-            if ir {
+            if args.ast {
+                Ok(println!("{:#?}", res))
+            } else if args.ir {
                 codegen::show(name, &res.program, &res.scopes)
             } else {
                 codegen::generate(name, &res.program, &res.scopes)
