@@ -8,6 +8,8 @@ edition = "2018"
 
 [dev-dependencies]
 insta = "0.16"
+assert_cmd = "0.10"
+predicates = "1"
 
 [dependencies]
 structopt = "0.3"

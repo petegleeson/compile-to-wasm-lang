@@ -1,0 +1,17 @@
+---
+source: tests/cli.rs
+expression: "std::str::from_utf8(&res.stdout).unwrap()"
+---
+; ModuleID = 'global-declarations'
+source_filename = "global-declarations"
+
+@x = global i32 1
+@y = global i32 ()* @fn_8
+
+define i32 @fn_8() {
+entry:
+  ret i32 1
+}
+
+✅ Done
+

@@ -1506,6 +1506,7 @@ mod codegen {
 
     struct Types {
         int_32: LLVMTypeRef,
+        void: LLVMTypeRef,
     }
 
     struct Env {
@@ -1513,10 +1514,138 @@ mod codegen {
         context: LLVMContextRef,
         builder: LLVMBuilderRef,
         types: Types,
+        id_ptr_map: HashMap<String, LLVMValueRef>,
+    }
+
+    fn type_to_lltype(env: &Env, ty: &crate::typecheck::Type) -> LLVMTypeRef {
+        use crate::typecheck::Type::*;
+        match ty {
+            I32 => env.types.int_32,
+            Void => env.types.void,
+            Function { args, ret } => unsafe {
+                LLVMFunctionType(
+                    type_to_lltype(env, ret),
+                    {
+                        let mut ll_args = Vec::new();
+                        for arg in args {
+                            ll_args.push(type_to_lltype(env, arg));
+                        }
+                        ll_args.set_len(args.len());
+                        ll_args.as_mut_ptr()
+                    },
+                    args.len() as u32,
+                    0,
+                )
+            },
+            Var(_) => panic!("Cannot get lltype for type variable"),
+        }
     }
 
     fn generate_number(env: &mut Env, number: &Number) -> Result<LLVMValueRef, CodeGenFailure> {
-        unsafe { Ok(LLVMConstInt(env.types.int_32, number.value as u64, 0)) }
+        unsafe {
+            Ok(LLVMConstInt(
+                type_to_lltype(env, &number.ty),
+                number.value as u64,
+                0,
+            ))
+        }
+    }
+
+    fn generate_expression(
+        env: &mut Env,
+        exp: &Expression,
+        scopes: &HashMap<ScopeId, Scope<NodeId>>,
+    ) -> Result<LLVMValueRef, CodeGenFailure> {
+        unsafe {
+            match exp {
+                Expression::Number(n) => generate_number(env, n),
+                Expression::Identifier(id) => match scopes.get(&id.scope).unwrap() {
+                    Scope::Global { .. } => Ok(LLVMGetNamedGlobal(
+                        env.module,
+                        CString::new(id.value.clone()).unwrap().as_ptr(),
+                    )),
+                    Scope::Local { .. } => Ok(LLVMBuildLoad(
+                        env.builder,
+                        *env.id_ptr_map.get(&id.value).unwrap(),
+                        c_str!(""),
+                    )),
+                },
+                Expression::Function(func) => {
+                    let function_type = type_to_lltype(env, &func.ty);
+                    let f = LLVMAddFunction(
+                        env.module,
+                        CString::new(format!("fn_{}", func.uid)).unwrap().as_ptr(),
+                        function_type,
+                    );
+                    let block = LLVMAppendBasicBlockInContext(
+                        env.context,
+                        f,
+                        b"entry\0".as_ptr() as *const _,
+                    );
+                    LLVMPositionBuilderAtEnd(env.builder, block);
+
+                    let result =
+                        func.body
+                            .iter()
+                            .fold(Ok(None), |res, statement| match (res, statement) {
+                                (Err(e), _) => Err(e),
+                                (Ok(_), Statement::Declaration(d)) => {
+                                    generate_declaration(env, d, scopes).map(|_| None)
+                                }
+                                (Ok(_), Statement::Expression(e)) => {
+                                    generate_expression(env, e, scopes).map(|v| Some(v))
+                                }
+                            });
+
+                    match result {
+                        Ok(Some(llval_ref)) => {
+                            LLVMBuildRet(env.builder, llval_ref);
+                            Ok(f)
+                        }
+                        Ok(None) => {
+                            LLVMBuildRetVoid(env.builder);
+                            Ok(f)
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+            }
+            /*
+
+            match &declaration.value {
+                Expression::Number(n) => {
+                    generate_number(env, &n).and_then(|ll_num| match scopes.get(&declaration.scope) {
+                        Some(Scope::Global { .. }) => unsafe {
+                            let g = LLVMAddGlobal(env.module, env.types.int_32, id_name.as_ptr());
+                            LLVMSetInitializer(g, ll_num);
+                            Ok(())
+                        },
+                        Some(Scope::Local { .. }) => {
+                            let ptr = LLVMBuildAlloca(
+                                env.builder,
+                                type_to_lltype(env, &n.ty),
+                                id_name.as_ptr(),
+                            );
+                            env.id_ptr_map.insert(declaration.id.value.clone(), ptr);
+                            LLVMBuildStore(env.builder, ll_num, ptr);
+                            Ok(())
+                        }
+                        _ => Err(CodeGenFailure {
+                            message: String::from("Don't know how to codegen this"),
+                        }),
+                    })
+                }
+                Expression::Identifier(rhs_id) => unsafe {
+                    let rhs_name = CString::new(rhs_id.value.clone()).unwrap();
+                    let rhs_value = LLVMGetNamedGlobal(env.module, rhs_name.as_ptr());
+                    // @Idea could also create this type from rhs_id.ty
+                    let rhs_type = LLVMGlobalGetValueType(rhs_value);
+                    let g = LLVMAddGlobal(env.module, LLVMPointerType(rhs_type, 0), id_name.as_ptr());
+                    LLVMSetInitializer(g, rhs_value);
+                    Ok(())
+                },
+                */
+        }
     }
 
     fn generate_declaration(
@@ -1524,43 +1653,40 @@ mod codegen {
         declaration: &Declaration,
         scopes: &HashMap<ScopeId, Scope<NodeId>>,
     ) -> Result<(), CodeGenFailure> {
-        let id_name = CString::new(declaration.id.value.clone()).unwrap();
-        match &declaration.value {
-            Expression::Number(n) => {
-                generate_number(env, &n).and_then(|ll_num| match scopes.get(&declaration.scope) {
-                    Some(Scope::Global { .. }) => unsafe {
-                        let g = LLVMAddGlobal(env.module, env.types.int_32, id_name.as_ptr());
-                        LLVMSetInitializer(g, ll_num);
+        unsafe {
+            let id_name = CString::new(declaration.id.value.clone()).unwrap();
+            match scopes.get(&declaration.scope) {
+                Some(Scope::Global { .. }) => generate_expression(env, &declaration.value, scopes)
+                    .and_then(|ll_val| {
+                        let g = LLVMAddGlobal(
+                            env.module,
+                            {
+                                let ty = type_to_lltype(env, &declaration.id.ty);
+                                match declaration.value {
+                                    Expression::Function(_) => LLVMPointerType(ty, 0),
+                                    Expression::Identifier(_) => LLVMPointerType(ty, 0),
+                                    Expression::Number(_) => ty,
+                                }
+                            },
+                            id_name.as_ptr(),
+                        );
+                        LLVMSetInitializer(g, ll_val);
                         Ok(())
-                    },
-                    _ => Err(CodeGenFailure {
-                        message: String::from("Don't know how to codegen this"),
                     }),
-                })
+                Some(Scope::Local { .. }) => {
+                    let ptr = LLVMBuildAlloca(
+                        env.builder,
+                        type_to_lltype(env, &declaration.id.ty),
+                        id_name.as_ptr(),
+                    );
+                    env.id_ptr_map.insert(declaration.id.value.clone(), ptr);
+                    generate_expression(env, &declaration.value, scopes).and_then(|ll_val| {
+                        LLVMBuildStore(env.builder, ll_val, ptr);
+                        Ok(())
+                    })
+                }
+                _ => panic!("Internal error: could not find binding in scope"),
             }
-            Expression::Identifier(rhs_id) => unsafe {
-                let rhs_name = CString::new(rhs_id.value.clone()).unwrap();
-                let rhs_value = LLVMGetNamedGlobal(env.module, rhs_name.as_ptr());
-                // @Idea could also create this type from rhs_id.ty
-                let rhs_type = LLVMGlobalGetValueType(rhs_value);
-                let g = LLVMAddGlobal(env.module, LLVMPointerType(rhs_type, 0), id_name.as_ptr());
-                LLVMSetInitializer(g, rhs_value);
-                Ok(())
-            },
-            Expression::Function(func) => unsafe { Ok(()) },
-        }
-    }
-
-    fn generate_statement(
-        env: &mut Env,
-        statement: &Statement,
-        scopes: &HashMap<ScopeId, Scope<NodeId>>,
-    ) -> Result<(), CodeGenFailure> {
-        match statement {
-            Statement::Declaration(d) => generate_declaration(env, d, scopes),
-            _ => Err(CodeGenFailure {
-                message: String::from("Don't know how to codegen this"),
-            }),
         }
     }
 
@@ -1614,7 +1740,9 @@ mod codegen {
                 builder,
                 types: Types {
                     int_32: LLVMInt32TypeInContext(context),
+                    void: LLVMVoidTypeInContext(context),
                 },
+                id_ptr_map: HashMap::new(),
             };
             // setup
             let result = match generate_program(&mut env, program, scopes) {
@@ -1727,14 +1855,20 @@ mod codegen {
                 builder,
                 types: Types {
                     int_32: LLVMInt32TypeInContext(context),
+                    void: LLVMVoidTypeInContext(context),
                 },
+                id_ptr_map: HashMap::new(),
             };
             // setup
             let result = match generate_program(&mut env, program, scopes) {
                 Err(e) => Err(e),
                 Ok(_) => {
-                    LLVMDumpModule(env.module);
-                    println!("");
+                    println!(
+                        "{}",
+                        CString::from_raw(LLVMPrintModuleToString(env.module))
+                            .to_str()
+                            .unwrap()
+                    );
                     Ok(())
                 }
             };
